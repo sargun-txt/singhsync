@@ -25,6 +25,9 @@ object OTPNotificationService {
 
     private const val TAG = "OTPNotificationService"
 
+    /** Outcome of [publishEncryptedOTP]; never carries the OTP itself. */
+    internal enum class OtpPublishResult { SENT, NOT_PAIRED, NOT_AUTHENTICATED, ENCRYPTION_UNAVAILABLE }
+
     /**
      * Encrypts the given [otpCode] and writes it to the Firestore `notifications` collection
      * so the paired Mac can receive it in near-real-time.
@@ -41,8 +44,8 @@ object OTPNotificationService {
      * }
      * ```
      *
-     * If no pairing ID is stored (i.e. the device has not yet completed pairing), the method
-     * logs an error and returns immediately without writing anything to Firestore.
+     * Fails closed: if the device is not paired, the key is missing, or encryption fails for
+     * any reason, nothing is written. The OTP is never uploaded or logged in plain text.
      *
      * @param context  Application context used to look up pairing and device metadata.
      * @param otpCode  The plain-text OTP string to encrypt and forward (e.g. `"847291"`).
@@ -50,114 +53,103 @@ object OTPNotificationService {
     fun notifyOTPDetected(context: Context, otpCode: String) {
         val appContext = context.applicationContext
 
-        try {
-            val pairingId  = DeviceManager.getPairingId(appContext)
-            val deviceId   = DeviceManager.getDeviceId(appContext)
-            val deviceName = DeviceManager.getAndroidDeviceName()
+        // Local-only mode never talks to the cloud (no upload, no Firebase sign-in); OTPs still
+        // reach the Mac over the local route via LocalSyncManager.
+        if (DeviceManager.getSyncMode(appContext) != "hybrid") return
 
-            // Without a valid pairing ID the Mac cannot match this document to an active session,
-            // so there is no point writing to Firestore.
-            if (pairingId == null) {
-                Log.e(TAG, "No pairing ID found - cannot send OTP notification")
-                return
+        try {
+            val result = publishEncryptedOTP(
+                otpCode    = otpCode,
+                pairingId  = DeviceManager.getPairingId(appContext),
+                sourceUid  = CloudAuth.currentUid(appContext),
+                hexKey     = DeviceManager.getEncryptionKey(appContext),
+                deviceId   = DeviceManager.getDeviceId(appContext),
+                deviceName = DeviceManager.getAndroidDeviceName()
+            ) { fields ->
+                val notificationData = HashMap<String, Any>(fields).apply {
+                    put("timestamp", com.google.firebase.firestore.FieldValue.serverTimestamp())
+                }
+                FirestoreManager.getDb(appContext).collection("notifications")
+                    .add(notificationData)
+                    .addOnSuccessListener { documentReference ->
+                    }
+                    .addOnFailureListener { exception ->
+                        Log.e(TAG, "Failed to send OTP notification", exception)
+                    }
             }
 
-            // Encrypt the OTP before it leaves the device; the Mac decrypts it with the shared key.
-            val encryptedOTP = encryptOTP(appContext, otpCode)
+            when (result) {
+                OtpPublishResult.SENT -> Unit
+                // Without a valid pairing ID the Mac cannot match this document to an active session.
+                OtpPublishResult.NOT_PAIRED ->
+                    Log.e(TAG, "No pairing ID found - cannot send OTP notification")
+                OtpPublishResult.NOT_AUTHENTICATED -> {
+                    // Firestore rules require a member identity; sign in for next time.
+                    Log.e(TAG, "OTP not sent: not signed in to cloud sync")
+                    CloudAuth.withUid(appContext) { }
+                }
+                OtpPublishResult.ENCRYPTION_UNAVAILABLE -> {
+                    Log.e(TAG, "OTP not sent: encryption key unavailable or encryption failed")
+                    DeviceManager.notifySecurityError(appContext, "Encryption failed — OTP not sent")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error sending OTP notification", e)
+        }
+    }
 
-            val notificationData = hashMapOf<String, Any>(
+    /**
+     * Encrypts [otpCode] and hands the document fields to [upload] — only on success.
+     *
+     * Separated from [notifyOTPDetected] so the fail-closed behaviour can be unit tested
+     * without Android or Firestore. [upload] is never invoked with, or without, an OTP when
+     * encryption is not possible; there is no plaintext fallback.
+     */
+    internal fun publishEncryptedOTP(
+        otpCode:    String,
+        pairingId:  String?,
+        sourceUid:  String?,
+        hexKey:     String?,
+        deviceId:   String,
+        deviceName: String,
+        upload:     (Map<String, Any>) -> Unit
+    ): OtpPublishResult {
+        if (pairingId == null) return OtpPublishResult.NOT_PAIRED
+        if (!CloudPairingAuth.isValidUid(sourceUid)) return OtpPublishResult.NOT_AUTHENTICATED
+
+        // Encrypt the OTP before it leaves the device; the Mac decrypts it with the shared key.
+        val encryptedOTP = encryptOTP(otpCode, hexKey) ?: return OtpPublishResult.ENCRYPTION_UNAVAILABLE
+
+        upload(
+            mapOf(
                 "type"             to "OTP_NOTIFICATION",
                 "encryptedOTP"     to encryptedOTP,
                 "pairingId"        to pairingId,
+                "sourceUid"        to sourceUid!!,
                 "sourceDeviceId"   to deviceId,
-                "sourceDeviceName" to deviceName,
-                "timestamp"        to com.google.firebase.firestore.FieldValue.serverTimestamp()
+                "sourceDeviceName" to deviceName
             )
-
-            FirestoreManager.getDb(appContext).collection("notifications")
-                .add(notificationData)
-                .addOnSuccessListener { documentReference ->
-                }
-                .addOnFailureListener { exception ->
-                    Log.e(TAG, "Failed to send OTP notification", exception)
-                }
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Error sending OTP notification: ${e.message}", e)
-        }
+        )
+        return OtpPublishResult.SENT
     }
 
     /**
-     * Encrypts [otpCode] using AES-256-GCM and returns the result as a Base64-encoded string.
+     * Encrypts [otpCode] with AES-256-GCM via [AesGcmCipher] and returns it Base64-encoded
+     * (standard alphabet, no line wrapping — identical to `android.util.Base64.NO_WRAP`).
      *
-     * A cryptographically-random 12-byte IV is generated on every call to guarantee semantic
-     * security — encrypting the same OTP twice will never produce identical ciphertext.
+     * Binary layout before encoding: `[ 12-byte IV ][ ciphertext ][ 16-byte GCM tag ]`, the
+     * same format [FirestoreManager] uses, so the Mac decrypts it with its existing path.
      *
-     * Binary layout of the output (before Base64 encoding):
-     * ```
-     * [ 12 bytes : IV ] [ N bytes : AES-GCM ciphertext ] [ 16 bytes : GCM authentication tag ]
-     * ```
-     * Prepending the IV to the ciphertext lets the recipient extract it at decryption time
-     * without requiring a separate transmission channel.
-     *
-     * If encryption fails for any reason (e.g. a malformed stored key), the method logs the
-     * error and returns the plain-text OTP as a last resort so the user is not silently blocked
-     * from receiving their code. This fallback path should never be reached in production.
-     *
-     * @param context  Application context used to retrieve the AES session key via [DeviceManager].
-     * @param otpCode  The plain-text OTP to encrypt.
-     * @return         A Base64 (NO_WRAP) string encoding `[IV][ciphertext+GCM tag]`.
+     * @return the encoded ciphertext, or `null` if [hexKey] is missing or encryption fails
+     *         for any reason (malformed key, wrong key length, provider error). Never returns
+     *         the plain-text OTP.
      */
-    private fun encryptOTP(context: Context, otpCode: String): String {
+    internal fun encryptOTP(otpCode: String, hexKey: String?): String? {
+        if (hexKey.isNullOrEmpty()) return null
         return try {
-            val keySpec = javax.crypto.spec.SecretKeySpec(
-                hexStringToByteArray(DeviceManager.getEncryptionKey(context) ?: ""), "AES"
-            )
-            val cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
-
-            // A unique IV must be used for every encryption operation. Reusing an IV with the
-            // same key would catastrophically break GCM's confidentiality and integrity guarantees.
-            val iv = ByteArray(12).also { java.security.SecureRandom().nextBytes(it) }
-            cipher.init(javax.crypto.Cipher.ENCRYPT_MODE, keySpec, javax.crypto.spec.GCMParameterSpec(128, iv))
-
-            val ciphertext = cipher.doFinal(otpCode.toByteArray(Charsets.UTF_8))
-
-            // Concatenate IV and ciphertext (which already contains the 16-byte GCM auth tag)
-            // into a single buffer so both travel together as one Base64 string.
-            val combined = ByteArray(iv.size + ciphertext.size)
-            System.arraycopy(iv,         0, combined, 0,       iv.size)
-            System.arraycopy(ciphertext, 0, combined, iv.size, ciphertext.size)
-
-            android.util.Base64.encodeToString(combined, android.util.Base64.NO_WRAP)
+            java.util.Base64.getEncoder().encodeToString(AesGcmCipher.encrypt(otpCode, hexKey))
         } catch (e: Exception) {
-            Log.e(TAG, "OTP encryption failed - sending plaintext as fallback", e)
-            otpCode  // Last-resort fallback; the Mac will still receive a usable OTP value.
+            null
         }
-    }
-
-    /**
-     * Converts a hex-encoded string into its raw [ByteArray] representation.
-     *
-     * Every pair of hex characters maps to one byte. For example, the input `"4A2F"` produces
-     * the two-byte array `[0x4A, 0x2F]`. This helper is used to decode the hex-encoded AES
-     * session key returned by [DeviceManager] into the raw bytes required by [javax.crypto].
-     *
-     * @param s  A hex string whose length must be even and whose characters must all be valid
-     *           hexadecimal digits (`0–9`, `A–F`, `a–f`).
-     * @throws IllegalArgumentException if [s] has an odd number of characters or contains a
-     *         character that is not a valid hexadecimal digit.
-     */
-    private fun hexStringToByteArray(s: String): ByteArray {
-        require(s.length % 2 == 0) { "Invalid hex length" }
-        val data = ByteArray(s.length / 2)
-        var i = 0
-        while (i < s.length) {
-            val high = Character.digit(s[i],     16)
-            val low  = Character.digit(s[i + 1], 16)
-            require(high != -1 && low != -1) { "Invalid hex character" }
-            data[i / 2] = ((high shl 4) + low).toByte()
-            i += 2
-        }
-        return data
     }
 }

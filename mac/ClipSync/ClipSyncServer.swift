@@ -3,18 +3,11 @@
 // from the paired Android device.  Also advertises itself via Bonjour/mDNS so
 // Android's NSD layer can discover the Mac's IP without manual configuration.
 //
-// Wire protocol (matches ClipSyncSender.kt exactly):
-//   Header (24 bytes):
-//     [4]  magic  0x43_4C_53_59 ("CLSY")
-//     [1]  version 0x01
-//     [1]  type    0x01=text 0x02=image 0x03=file
-//     [2]  reserved
-//     [8]  total payload size (Int64, big-endian)
-//     [8]  chunk size         (Int64, big-endian)
-//   Payload:
-//     Repeated: [4-byte Int32 chunk-length][encrypted chunk bytes]
-//
-// Each chunk is decrypted independently with AES-256-GCM.
+// Wire protocol: TCP protocol v2 (see TcpFrameProtocol.swift, shared with TcpFrameProtocol.kt).
+// An HMAC-SHA256-authenticated header (magic "CLS2", type, direction, plaintext totalSize,
+// chunk size, timestamp, random session ID, file name) followed by AES-256-GCM chunks whose
+// AAD binds each one to the session, type, direction, total size and chunk index.
+// Legacy v1 ("CLSY") frames are refused, except the no-data diagnostic ping.
 
 import Foundation
 import Network
@@ -30,7 +23,8 @@ class ClipSyncServer: ObservableObject {
     static let shared   = ClipSyncServer()
     @Published private(set) var dynamicPort: Int = 8765
 
-    private let magic: UInt32 = 0x434C5359   // "CLSY"
+    /// Session IDs of recently accepted v2 transfers (bounded, time-limited).
+    private let replayCache = TcpReplayCache()
     private let queue = DispatchQueue(label: "com.clipsync.tcpserver", qos: .userInitiated)
     private let diskWriteQueue = DispatchQueue(label: "com.clipsync.diskwrite", qos: .userInitiated)
     private let diskWriteSemaphore = DispatchSemaphore(value: 8)
@@ -85,7 +79,9 @@ class ClipSyncServer: ObservableObject {
             advertiseBonjour(on: tcpListener)
             listener = tcpListener
         } catch {
-            Crashlytics.crashlytics().record(error: error)
+            if UserDefaults.standard.string(forKey: "sync_mode") != "local" {
+                Crashlytics.crashlytics().record(error: error)
+            }
             lastError = "Failed to create listener: \(error.localizedDescription)"
             return
         }
@@ -183,40 +179,93 @@ class ClipSyncServer: ObservableObject {
         connection.start(queue: queue)
         activeReceiveConnection = connection
 
-        // Read the 24-byte header first
-        readExact(connection: connection, length: 24) { [weak self] headerData in
-            guard let self, let headerData else {
+        // The 4-byte magic selects the protocol: "CLS2" (authenticated v2) or legacy "CLSY".
+        readExact(connection: connection, length: 4) { [weak self] magicData in
+            guard let self, let magicData else {
                 connection.cancel()
                 return
             }
-            self.processHeader(headerData, connection: connection)
+            if [UInt8](magicData) == TcpFrameProtocol.legacyMagic {
+                self.handleLegacyFrame(connection: connection)
+            } else if [UInt8](magicData) == TcpFrameProtocol.magic {
+                self.readAuthenticatedHeader(magic: magicData, connection: connection)
+            } else {
+                connection.cancel()
+            }
         }
     }
 
-    private func processHeader(_ data: Data, connection: NWConnection) {
-        guard data.count == 24 else { connection.cancel(); return }
-
-        var offset = 0
-
-        let actualMagic = data.readUInt32BE(at: offset); offset += 4
-        guard actualMagic == magic else {
+    /// Legacy v1 frames are unauthenticated. The only one still honoured is the no-data
+    /// diagnostic ping (type 0x99) from ConnectionDiagnostics, which just posts a UI event.
+    /// Every other v1 frame — including the retired plaintext 0x04 — is refused.
+    private func handleLegacyFrame(connection: NWConnection) {
+        readExact(connection: connection, length: 20) { rest in
             connection.cancel()
-            return
-        }
-
-        let _  = data[offset]; offset += 1
-        let typeCode = data[offset]; offset += 1
-        offset += 2  // reserved
-
-        let totalSize = data.readInt64BE(at: offset); offset += 8
-        let _ = data.readInt64BE(at: offset)   // offset += 8
-
-
-        if typeCode == 0x99 {
-            connection.cancel()
+            guard let rest, rest.count == 20, [UInt8](rest)[1] == TransferTypeCode.diagnosticPing else {
+                // A real v1 transfer from an old phone: refused (never parsed further), user told once.
+                WakeupReceiver.notifyLegacyPeerOnce()
+                return
+            }
             DispatchQueue.main.async {
                 NotificationCenter.default.post(name: NSNotification.Name("DiagnosticTCPPingReceived"), object: nil)
             }
+        }
+    }
+
+    /// Reads and verifies the v2 header. Nothing from the header is trusted, and nothing is
+    /// created on disk, until its HMAC, timestamp and session ID have all been checked.
+    private func readAuthenticatedHeader(magic magicData: Data, connection: NWConnection) {
+        readExact(connection: connection, length: TcpFrameProtocol.fixedPrefixLength - 4) { [weak self] rest in
+            guard let self, let rest else { connection.cancel(); return }
+            let fixed = magicData + rest
+            guard let unverified = try? TcpFrameProtocol.parseFixedPrefix(fixed, expectedDirection: .androidToMac) else {
+                connection.cancel()
+                return
+            }
+            self.readExact(connection: connection, length: unverified.nameLength + TcpFrameProtocol.macLength) { [weak self] tail in
+                guard let self, let tail else { connection.cancel(); return }
+                let tailBytes = [UInt8](tail)
+                let prefix = fixed + Data(tailBytes[0..<unverified.nameLength])
+                let mac = Data(tailBytes[unverified.nameLength...])
+
+                guard let rootKey = self.pairingRootKey() else { connection.cancel(); return }
+                let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+                guard let header = try? TcpFrameProtocol.verifyHeader(
+                        prefix: prefix, mac: mac,
+                        authKey: TcpFrameProtocol.authKey(rootKey: rootKey),
+                        expectedDirection: .androidToMac, nowMs: nowMs),
+                      self.replayCache.insertIfNew(header.sessionId, nowMs: nowMs) else {
+                    connection.cancel()
+                    return
+                }
+                self.processVerifiedHeader(header, rootKey: rootKey, connection: connection)
+            }
+        }
+    }
+
+    private func processVerifiedHeader(_ header: TcpFrameHeader, rootKey: SymmetricKey, connection: NWConnection) {
+        let typeCode = header.type
+        let totalSize = header.totalSize
+
+        let isFile = typeCode == TransferTypeCode.file
+        let destinationDir: URL?
+        if isFile {
+            guard let dir = incomingFileDirectory() else {
+                connection.cancel()
+                return
+            }
+            destinationDir = dir
+        } else {
+            destinationDir = nil
+        }
+
+        // Validate the (now authenticated) size before anything is created or buffered.
+        guard TransferSecurityPolicy.isAcceptableTotalSize(
+            totalSize,
+            typeCode: typeCode,
+            availableCapacity: destinationDir.flatMap { availableCapacity(of: $0) }
+        ) else {
+            connection.cancel()
             return
         }
 
@@ -230,133 +279,124 @@ class ClipSyncServer: ObservableObject {
             self.startSpeedTimer()
         }
 
-        // Read filename length (4 bytes) and then filename for ALL types (Android always sends it)
-        readExact(connection: connection, length: 4) { [weak self] lenData in
-            guard let self, let lenData else { connection.cancel(); return }
-            let nameLen = Int(lenData.readUInt32BE(at: 0))
-            if nameLen > 0 && nameLen < 2048 {
-                self.readExact(connection: connection, length: nameLen) { nameData in
-                    let fileName = nameData.flatMap { String(data: $0, encoding: .utf8) } ?? "ClipSync_\(Int(Date().timeIntervalSince1970))"
-                    DispatchQueue.main.async { self.currentTransferFileName = fileName }
-                    
-                    var handle: FileHandle? = nil
-                    var destUrl: URL? = nil
-                    if typeCode == 0x03 || typeCode == 0x04 {
-                        let prefPath = UserDefaults.standard.string(forKey: "PreferredFileStorageLocation") ?? ""
-                        let downloads = prefPath.isEmpty ? FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first! : URL(fileURLWithPath: prefPath)
-                        let dest = downloads.appendingPathComponent(fileName)
-                        if !FileManager.default.fileExists(atPath: dest.path) {
-                            FileManager.default.createFile(atPath: dest.path, contents: nil, attributes: nil)
-                        }
-                        handle = try? FileHandle(forWritingTo: dest)
-                        destUrl = dest
-                        self.activeReceiveFileHandle = handle
-                        self.activeReceiveFileURL = destUrl
-                    }
-                    
-                    if typeCode == 0x04 {
-                        self.readZeroCopyStream(connection: connection, totalSize: totalSize, typeCode: typeCode, fileName: fileName, fileHandle: handle, fileUrl: destUrl, accumulatedReceived: 0)
-                    } else {
-                        self.readChunks(connection: connection, totalSize: totalSize, typeCode: typeCode, buffer: Data(), fileName: fileName, fileHandle: handle, fileUrl: destUrl, accumulatedReceived: 0)
-                    }
-                }
-            } else {
-                var handle: FileHandle? = nil
-                var destUrl: URL? = nil
-                let fallbackName = "ClipSync_\(Int(Date().timeIntervalSince1970))"
-                DispatchQueue.main.async { self.currentTransferFileName = fallbackName }
-                if typeCode == 0x03 || typeCode == 0x04 {
-                    let prefPath = UserDefaults.standard.string(forKey: "PreferredFileStorageLocation") ?? ""
-                    let downloads = prefPath.isEmpty ? FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first! : URL(fileURLWithPath: prefPath)
-                    let dest = downloads.appendingPathComponent(fallbackName)
-                    if !FileManager.default.fileExists(atPath: dest.path) {
-                        FileManager.default.createFile(atPath: dest.path, contents: nil, attributes: nil)
-                    }
-                    handle = try? FileHandle(forWritingTo: dest)
-                    destUrl = dest
-                    self.activeReceiveFileHandle = handle
-                    self.activeReceiveFileURL = destUrl
-                }
-                if typeCode == 0x04 {
-                    self.readZeroCopyStream(connection: connection, totalSize: totalSize, typeCode: typeCode, fileName: fallbackName, fileHandle: handle, fileUrl: destUrl, accumulatedReceived: 0)
-                } else {
-                    self.readChunks(connection: connection, totalSize: totalSize, typeCode: typeCode, buffer: Data(), fileName: fallbackName, fileHandle: handle, fileUrl: destUrl, accumulatedReceived: 0)
-                }
-            }
-        }
+        let rawName = header.fileName.isEmpty ? nil : String(data: header.fileName, encoding: .utf8)
+        beginPayload(connection: connection, header: header, rootKey: rootKey, rawFileName: rawName, destinationDir: destinationDir)
     }
 
+    /// Opens the destination (files only) and starts reading encrypted chunks.
+    /// Files are always created fresh under `destinationDir`; an existing file is never opened.
+    private func beginPayload(connection: NWConnection, header: TcpFrameHeader, rootKey: SymmetricKey, rawFileName: String?, destinationDir: URL?) {
+        let fileName = TransferSecurityPolicy.sanitizedFileName(rawFileName)
+            ?? "ClipSync_\(Int(Date().timeIntervalSince1970))"
+
+        var handle: FileHandle? = nil
+        var destUrl: URL? = nil
+        if let destinationDir {
+            guard let created = try? TransferSecurityPolicy.createUniqueFile(in: destinationDir, preferredName: fileName) else {
+                connection.cancel()
+                return
+            }
+            handle = created.handle
+            destUrl = created.url
+            self.activeReceiveFileHandle = handle
+            self.activeReceiveFileURL = destUrl
+        }
+
+        let displayName = destUrl?.lastPathComponent ?? fileName
+        DispatchQueue.main.async { self.currentTransferFileName = displayName }
+
+        readChunks(connection: connection, header: header, rootKey: rootKey, index: 0, buffer: Data(), fileName: displayName, fileHandle: handle, fileUrl: destUrl, accumulatedReceived: 0)
+    }
+
+    /// Where received files are saved: the user's preferred location, else ~/Downloads.
+    private func incomingFileDirectory() -> URL? {
+        let prefPath = UserDefaults.standard.string(forKey: "PreferredFileStorageLocation") ?? ""
+        if !prefPath.isEmpty {
+            return URL(fileURLWithPath: prefPath, isDirectory: true)
+        }
+        return FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+    }
+
+    /// Free space on the volume holding `directory`, or nil if it cannot be determined.
+    private func availableCapacity(of directory: URL) -> Int64? {
+        let values = try? directory.resourceValues(forKeys: [
+            .volumeAvailableCapacityForImportantUsageKey,
+            .volumeAvailableCapacityKey
+        ])
+        let important = values?.volumeAvailableCapacityForImportantUsage ?? 0
+        let plain = Int64(values?.volumeAvailableCapacity ?? 0)
+        let best = max(important, plain)
+        // Some volumes report 0 when the value is unavailable; treat that as unknown.
+        return best > 0 ? best : nil
+    }
+
+    /// The pairing key used for chunk encryption and as the HKDF root for header auth.
+    private func pairingRootKey() -> SymmetricKey? {
+        guard let hexKey = KeychainHelper.getEncryptionKey(),
+              hexKey.count == 64,
+              let keyData = hexKey.hexToData() else { return nil }
+        return SymmetricKey(data: keyData)
+    }
+
+    /// Reads chunk `index`. Its sealed length must be exactly what the authenticated header
+    /// implies, and it must open under AAD bound to this session, type, size and index.
     private func readChunks(
         connection:          NWConnection,
-        totalSize:           Int64,
-        typeCode:            UInt8,
+        header:              TcpFrameHeader,
+        rootKey:             SymmetricKey,
+        index:               UInt32,
         buffer:              Data,
         fileName:            String?,
         fileHandle:          FileHandle?,
         fileUrl:             URL?,
         accumulatedReceived: Int64
     ) {
+        let totalSize = header.totalSize
+        let typeCode = header.type
+
+        func fail() {
+            connection.cancel()
+            fileHandle?.closeFile()
+            if let fileUrl { try? FileManager.default.removeItem(at: fileUrl) }
+            self.activeReceiveFileHandle = nil
+            self.activeReceiveFileURL = nil
+        }
+
         // Read 4-byte chunk length prefix
         readExact(connection: connection, length: 4) { [weak self] lenData in
-            guard let self = self, let lenData = lenData else {
-                connection.cancel()
-                fileHandle?.closeFile()
-                if let fileUrl = fileUrl { try? FileManager.default.removeItem(at: fileUrl) }
-                self?.activeReceiveFileHandle = nil
-                self?.activeReceiveFileURL = nil
+            guard let self = self else { return }
+            guard let lenData = lenData,
+                  let expectedLen = try? TcpFrameProtocol.expectedSealedLength(header, index: index),
+                  Int(lenData.readUInt32BE(at: 0)) == expectedLen else {
+                fail()
                 return
             }
 
-            let chunkLen = Int(lenData.readUInt32BE(at: 0))
-            guard chunkLen > 0, chunkLen <= 5 * 1024 * 1024 + 512 /* max chunk + tag */ else {
-                connection.cancel()
-                fileHandle?.closeFile()
-                if let fileUrl { try? FileManager.default.removeItem(at: fileUrl) }
-                self.activeReceiveFileHandle = nil
-                self.activeReceiveFileURL = nil
-                return
-            }
-
-            self.readExact(connection: connection, length: chunkLen) { [weak self] chunkData in
+            self.readExact(connection: connection, length: expectedLen) { [weak self] chunkData in
                 guard let self = self else { return }
-                guard let chunkData else {
-                    connection.cancel()
-                    fileHandle?.closeFile()
-                    if let fileUrl { try? FileManager.default.removeItem(at: fileUrl) }
-                    self.activeReceiveFileHandle = nil
-                    self.activeReceiveFileURL = nil
+                guard let chunkData,
+                      let decrypted = try? TcpFrameProtocol.openChunk(chunkData, key: rootKey, header: header, index: index) else {
+                    fail()
                     return
                 }
 
                 var accumulated = buffer
                 var bytesToCount = 0
-                if let decrypted = self.decryptChunk(chunkData) {
-                    if let handle = fileHandle {
-                        guard self.activeReceiveFileHandle != nil else { return } // Cancelled mid-read
-                        
-                        // Decouple disk write from network read
-                        self.diskWriteSemaphore.wait()
-                        self.diskWriteQueue.async {
-                            defer { self.diskWriteSemaphore.signal() }
-                            if #available(macOS 10.15.4, *) {
-                                handle.write(decrypted)
-                            } else {
-                                handle.write(decrypted)
-                            }
-                        }
-                        bytesToCount = decrypted.count
-                    } else {
-                        accumulated.append(decrypted)
+                if let handle = fileHandle {
+                    guard self.activeReceiveFileHandle != nil else { return } // Cancelled mid-read
+
+                    // Decouple disk write from network read
+                    self.diskWriteSemaphore.wait()
+                    self.diskWriteQueue.async {
+                        defer { self.diskWriteSemaphore.signal() }
+                        handle.write(decrypted)
                     }
+                    bytesToCount = decrypted.count
                 } else {
-                    fileHandle?.closeFile()
-                    if let fileUrl { try? FileManager.default.removeItem(at: fileUrl) }
-                    self.activeReceiveFileHandle = nil
-                    self.activeReceiveFileURL = nil
-                    connection.cancel()
-                    return
+                    accumulated.append(decrypted)
                 }
 
+                // Counts plaintext only; equals totalSize exactly after the last chunk.
                 let received = fileHandle != nil ? accumulatedReceived + Int64(bytesToCount) : Int64(accumulated.count)
                 DispatchQueue.main.async {
                     self.bytesReceived = received
@@ -368,7 +408,7 @@ class ClipSyncServer: ObservableObject {
                 if received >= totalSize {
                     // All chunks received
                     self.diskWriteQueue.async {
-                        if typeCode != 0x03 && typeCode != 0x04 {
+                        if typeCode != 0x03 {
                             self.deliver(data: accumulated, typeCode: typeCode, fileName: fileName, fileUrl: fileUrl)
                         } else {
                             self.deliver(data: Data(), typeCode: typeCode, fileName: fileName, fileUrl: fileUrl)
@@ -383,8 +423,9 @@ class ClipSyncServer: ObservableObject {
                     // More chunks to read
                     self.readChunks(
                         connection:          connection,
-                        totalSize:           totalSize,
-                        typeCode:            typeCode,
+                        header:              header,
+                        rootKey:             rootKey,
+                        index:               index + 1,
                         buffer:              accumulated,
                         fileName:            fileName,
                         fileHandle:          fileHandle,
@@ -393,76 +434,6 @@ class ClipSyncServer: ObservableObject {
                     )
                 }
             }
-        }
-    }
-
-    private func readZeroCopyStream(
-        connection:          NWConnection,
-        totalSize:           Int64,
-        typeCode:            UInt8,
-        fileName:            String?,
-        fileHandle:          FileHandle?,
-        fileUrl:             URL?,
-        accumulatedReceived: Int64
-    ) {
-        if accumulatedReceived >= totalSize {
-            fileHandle?.closeFile()
-            self.activeReceiveFileHandle = nil
-            self.activeReceiveFileURL = nil
-            connection.cancel()
-            if let url = fileUrl {
-                self.deliver(data: Data(), typeCode: typeCode, fileName: fileName, fileUrl: url)
-            } else {
-                self.deliver(data: Data(), typeCode: typeCode, fileName: fileName, fileUrl: nil)
-            }
-            return
-        }
-
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 4 * 1024 * 1024) { [weak self] content, context, isComplete, error in
-            guard let self = self else { return }
-            
-            var newlyReceived = 0
-            if let data = content, !data.isEmpty {
-                newlyReceived = data.count
-                if let handle = fileHandle {
-                    guard self.activeReceiveFileHandle != nil else { return } // Cancelled mid-read
-                    self.diskWriteSemaphore.wait()
-                    self.diskWriteQueue.async {
-                        defer { self.diskWriteSemaphore.signal() }
-                        if #available(macOS 10.15.4, *) {
-                            try? handle.write(contentsOf: data)
-                        } else {
-                            handle.write(data)
-                        }
-                    }
-                }
-                
-                DispatchQueue.main.async {
-                    self.bytesReceived += Int64(newlyReceived)
-                    if self.transferTotalBytes > 0 {
-                        self.transferProgress = Double(self.bytesReceived) / Double(self.transferTotalBytes)
-                    }
-                }
-            }
-            
-            if error != nil {
-                fileHandle?.closeFile()
-                if let fileUrl { try? FileManager.default.removeItem(at: fileUrl) }
-                self.activeReceiveFileHandle = nil
-                self.activeReceiveFileURL = nil
-                connection.cancel()
-                return
-            }
-            
-            self.readZeroCopyStream(
-                connection: connection,
-                totalSize: totalSize,
-                typeCode: typeCode,
-                fileName: fileName,
-                fileHandle: fileHandle,
-                fileUrl: fileUrl,
-                accumulatedReceived: accumulatedReceived + Int64(newlyReceived)
-            )
         }
     }
 
@@ -518,7 +489,7 @@ class ClipSyncServer: ObservableObject {
                     pasteboard.writeObjects([image])
                     historyContent = "Image received"
                 }
-            case 0x03, 0x04: // file — saved to Downloads (0x04 = UltraFast unencrypted)
+            case 0x03: // file — saved to Downloads
                 if let url = fileUrl {
                     historyContent = url.lastPathComponent
 
@@ -540,7 +511,7 @@ class ClipSyncServer: ObservableObject {
             if let content = historyContent {
                 let deviceName = PairingManager.shared.pairedDeviceName
                 let isImage = (typeCode == 0x02)
-                let isFile = (typeCode == 0x03 || typeCode == 0x04)
+                let isFile = (typeCode == 0x03)
                 let newItem = ClipboardItem(
                     content: content,
                     timestamp: Date(),
@@ -665,16 +636,12 @@ class ClipSyncServer: ObservableObject {
             let encryptedData = sealed.combined! // nonce(12) + ciphertext + tag(16)
             let base64 = encryptedData.base64EncodedString()
 
-            // Build the BLE JSON payload
-            let payload: [String: Any] = [
-                "type": "text",
-                "content": base64
-            ]
+            // Authenticated BLE envelope carrying the encrypted text
+            let fields: [BleField: Data] = [.content: BleControlProtocol.utf8(base64)]
 
-            if let jsonData = try? JSONSerialization.data(withJSONObject: payload),
-               jsonData.count <= 500 {
+            if BleControlProtocol.envelopeLength(fields) <= 500 {
                 // Fast path: fits in a single BLE notify
-                let pushed = WakeupReceiver.shared.pushToAndroid(jsonData)
+                let pushed = WakeupReceiver.shared.push(.pushText, fields)
                 if pushed {
                     completion(true)
                 } else {
@@ -721,8 +688,7 @@ class ClipSyncServer: ObservableObject {
         //    a stale ping_ack from a previous transfer and exit immediately,
         //    causing Mac to dial Android before it's actually awake.
         DispatchQueue.main.sync { WakeupReceiver.shared.lastPing = nil }
-        let prePing: [String: Any] = ["type": "ping"]
-        WakeupReceiver.shared.pushToAndroid(json: prePing)
+        WakeupReceiver.shared.push(.ping)
 
         let pingDeadline = Date().addingTimeInterval(5.0)
         while Date() < pingDeadline {
@@ -737,12 +703,10 @@ class ClipSyncServer: ObservableObject {
         }
 
         // 2. Signal Android: text is incoming (clipboard, not a file download)
-        let signal: [String: Any] = [
-            "type": "text_incoming",
-            "size": fileSize,
-            "port": androidTcpPort
-        ]
-        WakeupReceiver.shared.pushToAndroid(json: signal)
+        WakeupReceiver.shared.push(.textIncoming, [
+            .size: BleControlProtocol.i64(fileSize),
+            .port: BleControlProtocol.u16(androidTcpPort)
+        ])
 
         // 3. Wait for tcp_ready ACK
         let tcpDeadline = Date().addingTimeInterval(3.0)
@@ -763,7 +727,8 @@ class ClipSyncServer: ObservableObject {
             fileSize:   fileSize,
             fileName:   "__clipsync_text__",  // sentinel; Android reads this, ignores name
             ip:         androidIp,
-            port:       androidTcpPort
+            port:       androidTcpPort,
+            purpose:    .clipboardText  // always encrypted, regardless of the Ultra Fast toggle
         ) {
             // Clean up temp file after send (success or failure)
             try? FileManager.default.removeItem(at: tmpURL)
@@ -878,8 +843,7 @@ class ClipSyncServer: ObservableObject {
             //    a stale ping_ack from a previous transfer and exit immediately,
             //    causing Mac to dial Android before it's actually awake.
             DispatchQueue.main.sync { WakeupReceiver.shared.lastPing = nil }
-            let prePing: [String: Any] = ["type": "ping"]
-            WakeupReceiver.shared.pushToAndroid(json: prePing)
+            WakeupReceiver.shared.push(.ping)
 
             // Wait up to 5s for ping_ack. 3s was too tight for dozing Android
             // whose BLE stack can take 2-4s to fully process the wakeup.
@@ -902,13 +866,11 @@ class ClipSyncServer: ObservableObject {
             }
 
             // 2. BLE Notify: tell Android a file is incoming (now Android starts TCP server)
-            let signal: [String: Any] = [
-                "type": "file_incoming",
-                "filename": fileName,
-                "size": fileSize,
-                "port": androidTcpPort
-            ]
-            WakeupReceiver.shared.pushToAndroid(json: signal)
+            WakeupReceiver.shared.push(.fileIncoming, [
+                .fileName: BleControlProtocol.utf8(fileName),
+                .size: BleControlProtocol.i64(fileSize),
+                .port: BleControlProtocol.u16(androidTcpPort)
+            ])
 
             // 3. Wait for tcp_ready ACK (Android confirms its TCP server is up)
             let tcpDeadline = Date().addingTimeInterval(3.0)
@@ -924,6 +886,7 @@ class ClipSyncServer: ObservableObject {
                 fileName:   fileName,
                 ip:         androidIp,
                 port:       androidTcpPort,
+                purpose:    .userFile(ultraFastRequested: UserDefaults.standard.bool(forKey: "UltraFastTransfer")),
                 completion: completion
             )
         }
@@ -942,6 +905,7 @@ class ClipSyncServer: ObservableObject {
         fileName:   String,
         ip:         String,
         port:       Int,
+        purpose:    OutgoingPayloadPurpose,
         completion: @escaping () -> Void
     ) {
         guard let hexKey = KeychainHelper.getEncryptionKey(),
@@ -957,26 +921,28 @@ class ClipSyncServer: ObservableObject {
         }
 
         let key = SymmetricKey(data: keyData)
-        let chunkSize  = 1024 * 1024
-        let magic: UInt32 = 0x434C5359
-        let isUltraFast = UserDefaults.standard.bool(forKey: "UltraFastTransfer")
-        let typeCode: UInt8 = isUltraFast ? 0x04 : 0x03
-
-        // Build 24-byte header
-        var header = Data(capacity: 24)
-        var magicBE  = magic.bigEndian;    header.append(contentsOf: withUnsafeBytes(of: &magicBE)  { Array($0) })
-        header.append(0x01)               // version
-        header.append(typeCode)
-        header.append(contentsOf: [0x00, 0x00]) // reserved
-        var totalBE  = fileSize.bigEndian; header.append(contentsOf: withUnsafeBytes(of: &totalBE)  { Array($0) })
-        var chunkBE  = Int64(chunkSize).bigEndian; header.append(contentsOf: withUnsafeBytes(of: &chunkBE)  { Array($0) })
-
-        // Filename preamble
-        let nameData = fileName.data(using: .utf8) ?? Data()
-        var nameLenBE = UInt32(nameData.count).bigEndian
-        var preamble = Data()
-        preamble.append(contentsOf: withUnsafeBytes(of: &nameLenBE) { Array($0) })
-        preamble.append(nameData)
+        // v2 authenticated header. Every purpose uses an encrypted frame; Ultra Fast only selects
+        // a larger chunk size. totalSize is the plaintext byte count, independent of chunking.
+        let header = TcpFrameHeader(
+            type:        TransferSecurityPolicy.outgoingTypeCode(for: purpose),
+            direction:   .macToAndroid,
+            totalSize:   fileSize,
+            chunkSize:   TransferSecurityPolicy.outgoingChunkSize(for: purpose),
+            timestampMs: Int64(Date().timeIntervalSince1970 * 1000),
+            sessionId:   TcpFrameProtocol.newSessionId(),
+            fileName:    purpose == .clipboardText ? Data() : Data(fileName.utf8)
+        )
+        guard let headerBytes = try? TcpFrameProtocol.encodeHeader(header, authKey: TcpFrameProtocol.authKey(rootKey: key)) else {
+            fileHandle.closeFile()
+            DispatchQueue.main.async {
+                self.isSendingFile = false
+                self.currentTransferFileName = nil
+                self.transferSpeedString = ""
+                self.lastError = "Transfer failed: could not build transfer header."
+                completion()
+            }
+            return
+        }
 
         let host       = NWEndpoint.Host(ip)
         let nwPort     = NWEndpoint.Port(rawValue: UInt16(port))!
@@ -993,39 +959,26 @@ class ClipSyncServer: ObservableObject {
             switch state {
             case .ready:
 
-                // Send header + preamble first, then stream chunks
-                let initialPayload = header + preamble
-                connection.send(content: initialPayload, completion: .contentProcessed { [weak self] error in
+                // Send the authenticated header first, then stream chunks
+                connection.send(content: headerBytes, completion: .contentProcessed { [weak self] error in
                     guard let self else { return }
                     if let error {
                         fileHandle.closeFile()
                         self.finishAndroidFileSend(connection: connection, fileName: fileName, error: error, completion: completion)
                         return
                     }
-                    if typeCode == 0x04 {
-                        self.sendNextZeroCopyChunk(
-                            connection: connection,
-                            fileHandle: fileHandle,
-                            fileSize: fileSize,
-                            fileName: fileName,
-                            totalSent: 0,
-                            startTime: startTime,
-                            completion: completion
-                        )
-                    } else {
-                        // Kick off recursive chunk streaming
-                        self.sendNextChunk(
-                            connection:  connection,
-                            fileHandle:  fileHandle,
-                            fileSize:    fileSize,
-                            fileName:    fileName,
-                            key:         key,
-                            chunkSize:   chunkSize,
-                            totalSent:   0,
-                            startTime:   startTime,
-                            completion:  completion
-                        )
-                    }
+                    // Kick off recursive encrypted chunk streaming
+                    self.sendNextChunk(
+                        connection:  connection,
+                        fileHandle:  fileHandle,
+                        fileName:    fileName,
+                        key:         key,
+                        header:      header,
+                        index:       0,
+                        totalSent:   0,
+                        startTime:   startTime,
+                        completion:  completion
+                    )
                 })
 
             case .failed(let err):
@@ -1049,46 +1002,48 @@ class ClipSyncServer: ObservableObject {
         }
     }
 
-    /// Reads one chunk from FileHandle, encrypts it, and sends it.
-    /// Calls itself recursively until EOF, then calls finishAndroidFileSend.
+    /// Reads chunk `index` (exactly the length the header implies), seals it with AAD bound to
+    /// the session, and sends it. Recurses until all `header.totalSize` bytes are sent.
+    /// If the source turns out shorter or longer than declared, the transfer fails before the
+    /// final chunk is sent, so the receiver never completes with a wrong file.
     private func sendNextChunk(
         connection: NWConnection,
         fileHandle: FileHandle,
-        fileSize:   Int64,
         fileName:   String,
         key:        SymmetricKey,
-        chunkSize:  Int,
+        header:     TcpFrameHeader,
+        index:      UInt32,
         totalSent:  Int64,
         startTime:  Date,
         completion: @escaping () -> Void
     ) {
-        // Read next chunk from disk — only chunkSize bytes at a time
-        let rawChunk: Data
-        if #available(macOS 10.15.4, *) {
-            rawChunk = (try? fileHandle.read(upToCount: chunkSize)) ?? Data()
-        } else {
-            rawChunk = fileHandle.readData(ofLength: chunkSize)
+        let fileSize = header.totalSize
+
+        func sourceHasMoreBytes() -> Bool {
+            !((try? fileHandle.read(upToCount: 1)) ?? Data()).isEmpty
         }
 
-        guard !rawChunk.isEmpty else {
-            // EOF reached — we're done
+        guard let expectedLength = TcpFrameProtocol.plainLength(header, index: index) else {
+            // Every declared byte has been sent (or the transfer is empty).
+            let error: Error? = (index == 0 && sourceHasMoreBytes()) ? ClipSyncServerError.sourceSizeMismatch : nil
             fileHandle.closeFile()
-            finishAndroidFileSend(connection: connection, fileName: fileName, error: nil, completion: completion)
+            finishAndroidFileSend(connection: connection, fileName: fileName, error: error, completion: completion)
             return
         }
 
-        let nonce = AES.GCM.Nonce()
-        guard let sealed = try? AES.GCM.seal(rawChunk, using: key, nonce: nonce),
-              let combined = sealed.combined else {
+        let rawChunk = (try? fileHandle.read(upToCount: expectedLength)) ?? Data()
+        let isLast = Int64(index) + 1 == TcpFrameProtocol.chunkCount(header)
+        guard rawChunk.count == expectedLength, !(isLast && sourceHasMoreBytes()) else {
+            fileHandle.closeFile()
+            finishAndroidFileSend(connection: connection, fileName: fileName, error: ClipSyncServerError.sourceSizeMismatch, completion: completion)
+            return
+        }
+
+        guard let packet = try? TcpFrameProtocol.sealChunk(rawChunk, key: key, header: header, index: index) else {
             fileHandle.closeFile()
             finishAndroidFileSend(connection: connection, fileName: fileName, error: ClipSyncServerError.encryptionFailed, completion: completion)
             return
         }
-
-        var packet = Data(capacity: 4 + combined.count)
-        var lenBE  = UInt32(combined.count).bigEndian
-        packet.append(contentsOf: withUnsafeBytes(of: &lenBE) { Array($0) })
-        packet.append(combined)
 
         let newTotalSent = totalSent + Int64(rawChunk.count)
         let elapsed = max(Date().timeIntervalSince(startTime), 0.001)
@@ -1109,55 +1064,13 @@ class ClipSyncServer: ObservableObject {
             self.sendNextChunk(
                 connection: connection,
                 fileHandle: fileHandle,
-                fileSize:   fileSize,
                 fileName:   fileName,
                 key:        key,
-                chunkSize:  chunkSize,
+                header:     header,
+                index:      index + 1,
                 totalSent:  newTotalSent,
                 startTime:  startTime,
                 completion: completion
-            )
-        })
-    }
-
-    private func sendNextZeroCopyChunk(
-        connection: NWConnection,
-        fileHandle: FileHandle,
-        fileSize:   Int64,
-        fileName:   String,
-        totalSent:  Int64,
-        startTime:  Date,
-        completion: @escaping () -> Void
-    ) {
-        if totalSent >= fileSize {
-            self.finishAndroidFileSend(connection: connection, fileName: fileName, error: nil, completion: completion)
-            return
-        }
-
-        let chunkData = fileHandle.readData(ofLength: 4 * 1024 * 1024)   // ~2-5ms, negligible vs the send below
-        if chunkData.isEmpty {
-            self.finishAndroidFileSend(connection: connection, fileName: fileName, error: nil, completion: completion)
-            return
-        }
-
-        connection.send(content: chunkData, completion: .contentProcessed { [weak self] error in
-            guard let self else { return }
-            if let error {
-                fileHandle.closeFile()
-                self.finishAndroidFileSend(connection: connection, fileName: fileName, error: error, completion: completion)
-                return
-            }
-
-            let newTotalSent = totalSent + Int64(chunkData.count)
-            DispatchQueue.main.async {
-                self.sendFileProgress = fileSize > 0 ? Double(newTotalSent) / Double(fileSize) : 0
-                let elapsed = max(0.001, Date().timeIntervalSince(startTime))
-                self.transferSpeedString = String(format: "%.1f MB/s", Double(newTotalSent) / elapsed / 1_048_576.0)
-            }
-
-            self.sendNextZeroCopyChunk(
-                connection: connection, fileHandle: fileHandle, fileSize: fileSize,
-                fileName: fileName, totalSent: newTotalSent, startTime: startTime, completion: completion
             )
         })
     }
@@ -1233,11 +1146,14 @@ class ClipSyncServer: ObservableObject {
 
 private enum ClipSyncServerError: LocalizedError {
     case encryptionFailed
+    case sourceSizeMismatch
 
     var errorDescription: String? {
         switch self {
         case .encryptionFailed:
             return "Could not encrypt file chunk"
+        case .sourceSizeMismatch:
+            return "File size changed during transfer"
         }
     }
 }
@@ -1249,13 +1165,6 @@ private extension Data {
         let slice = self[offset ..< offset + 4]
         return slice.reversed().enumerated().reduce(0) { acc, pair in
             acc | (UInt32(pair.element) << (pair.offset * 8))
-        }
-    }
-
-    func readInt64BE(at offset: Int) -> Int64 {
-        let slice = self[offset ..< offset + 8]
-        return slice.reversed().enumerated().reduce(0) { acc, pair in
-            acc | (Int64(pair.element) << (pair.offset * 8))
         }
     }
 }

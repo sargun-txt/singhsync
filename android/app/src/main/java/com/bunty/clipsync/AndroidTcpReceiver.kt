@@ -21,9 +21,6 @@ import java.io.FileOutputStream
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
-import javax.crypto.Cipher
-import javax.crypto.spec.GCMParameterSpec
-import javax.crypto.spec.SecretKeySpec
 
 /**
  * AndroidTcpReceiver — on-demand TCP server that accepts exactly ONE file transfer from the Mac.
@@ -33,19 +30,24 @@ import javax.crypto.spec.SecretKeySpec
  *   → streams bytes to disk incrementally → closes socket → shows notification
  *   Auto-closes after 60 seconds if Mac never connects.
  *
- * Wire protocol (matches ClipSyncServer.swift writeFileOverTCP):
- *   Header 24 bytes: magic(4) + version(1) + typeCode(1) + reserved(2) + totalSize(8) + chunkSize(8)
- *   Preamble: nameLen(4) + name(nameLen)
- *   Chunks: [chunkLen(4) + encrypted_chunk]*
- *   Each chunk: nonce(12) + ciphertext + GCM_tag(16)
+ * Wire protocol: TCP protocol v2 (see [TcpFrameProtocol]) — an HMAC-authenticated header
+ * followed by AES-256-GCM chunks bound to the session. Legacy v1 frames are refused.
  */
 object AndroidTcpReceiver {
 
     private const val TAG = "AndroidTcpReceiver"
-    private const val MAGIC = 0x434C5359L   // "CLSY"
     private const val TIMEOUT_MS = 60_000
     private const val NOTIF_CHANNEL = "clipsync_file_transfer"
     private const val NOTIF_ID = 7701
+
+    /** Session IDs of recently accepted transfers (bounded, time-limited). */
+    private val replayCache = TcpReplayCache()
+
+    /** The pairing key, or null if this device is not paired / the key is malformed. */
+    private fun pairingRootKey(context: Context): ByteArray? =
+        DeviceManager.getEncryptionKey(context)?.let {
+            try { TcpFrameProtocol.rootKey(it) } catch (e: TcpFrameProtocol.FrameException) { null }
+        }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var serverSocket: ServerSocket? = null
@@ -153,49 +155,29 @@ object AndroidTcpReceiver {
     ) = withContext(Dispatchers.IO) {
         try {
             val inp = client.getInputStream()
-
-            // 1. Read 24-byte header (same format as file transfers)
-            val header = inp.readFully(24) ?: run {
-                Log.e(TAG, "receiveTextStream — failed to read header"); return@withContext
-            }
-            val magic = header.readUInt32BE(0)
-            if (magic != MAGIC) { Log.e(TAG, "receiveTextStream — bad magic: $magic"); return@withContext }
-            val totalSize = header.readInt64BE(8)
-
-            // 2. Read filename preamble (sent but ignored for text streams)
-            val nameLenBytes = inp.readFully(4) ?: return@withContext
-            val nameLen = nameLenBytes.readUInt32BE(0).toInt()
-            if (nameLen in 1..2048) inp.readFully(nameLen) // discard sentinel filename
-
-            // 3. Open decryption key
-            val hexKey = DeviceManager.getEncryptionKey(context)
-            val keyBytes = hexKey?.chunked(2)?.map { it.toInt(16).toByte() }?.toByteArray()
-            if (keyBytes == null) {
+            val rootKey = pairingRootKey(context) ?: run {
                 Log.e(TAG, "receiveTextStream — no encryption key"); return@withContext
             }
-            val secretKey = javax.crypto.spec.SecretKeySpec(keyBytes, "AES")
-            val cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
 
-            var received = 0L
-            val buffer = java.io.ByteArrayOutputStream(totalSize.coerceAtMost(10 * 1024 * 1024).toInt())
+            // 1. Authenticated header: nothing is trusted or allocated before this succeeds.
+            val header = try {
+                TcpFrameProtocol.readVerifiedHeader(
+                    inp, rootKey, TcpFrameProtocol.DIRECTION_MAC_TO_ANDROID, System.currentTimeMillis(), replayCache)
+            } catch (e: TcpFrameProtocol.FrameException) {
+                Log.e(TAG, "receiveTextStream — rejected: ${e.reason}"); return@withContext
+            }
+            if (header.type != TcpFrameProtocol.TYPE_TEXT) {
+                Log.e(TAG, "receiveTextStream — rejected: unexpected type"); return@withContext
+            }
 
-            while (received < totalSize) {
-                val chunkLenBytes = inp.readFully(4) ?: break
-                val chunkLen = chunkLenBytes.readUInt32BE(0).toInt()
-                if (chunkLen <= 0 || chunkLen > 5_000_000) {
-                    Log.e(TAG, "receiveTextStream — invalid chunk length: $chunkLen"); break
-                }
-                val encrypted = inp.readFully(chunkLen) ?: break
-                val decrypted = decryptChunk(encrypted, cipher, secretKey) ?: break
-                buffer.write(decrypted)
-                received += decrypted.size
+            // 2. Chunks, each bound to this session and index. totalSize is plaintext bytes.
+            val buffer = java.io.ByteArrayOutputStream(header.totalSize.coerceAtMost(10 * 1024 * 1024).toInt())
+            try {
+                TcpFrameProtocol.readChunks(inp, header, rootKey) { plain -> buffer.write(plain) }
+            } catch (e: TcpFrameProtocol.FrameException) {
+                Log.e(TAG, "receiveTextStream — rejected: ${e.reason}"); return@withContext
             }
             client.runCatching { close() }
-
-            if (received < totalSize) {
-                Log.w(TAG, "receiveTextStream — incomplete: $received / $totalSize bytes")
-                return@withContext
-            }
 
             val text = buffer.toString(Charsets.UTF_8.name())
             onReceived(text)
@@ -236,33 +218,34 @@ object AndroidTcpReceiver {
             try {
                 val inp = client.getInputStream()
 
-                // ── 1. Read 24-byte header ────────────────────────────────────
-                val header = inp.readFully(24) ?: run {
-                    Log.e(TAG, "Failed to read header"); return@withContext
+                // ── 1. Authenticated header ───────────────────────────────────
+                // Fail closed before any file or MediaStore entry is created.
+                fun reject(reason: String) {
+                    Log.e(TAG, "Rejected incoming transfer: $reason")
+                    client.runCatching { close() }
+                    activeClient = null
+                    _isReceiving.value = false
                 }
-                val magic = header.readUInt32BE(0)
-                if (magic != MAGIC) { Log.e(TAG, "Bad magic: $magic"); return@withContext }
-                val typeCode = header[5]
-                val isUltraFast = typeCode == 0x04.toByte()
-                val totalSize = header.readInt64BE(8)
+                val rootKey = pairingRootKey(context) ?: run {
+                    reject("no encryption key"); return@withContext
+                }
+                val header = try {
+                    TcpFrameProtocol.readVerifiedHeader(
+                        inp, rootKey, TcpFrameProtocol.DIRECTION_MAC_TO_ANDROID, System.currentTimeMillis(), replayCache)
+                } catch (e: TcpFrameProtocol.FrameException) {
+                    reject(e.reason.name); return@withContext
+                }
+                val typeCode = header.type
+                if (typeCode != TcpFrameProtocol.TYPE_FILE && typeCode != TcpFrameProtocol.TYPE_IMAGE) {
+                    reject("unexpected type"); return@withContext
+                }
+                // totalSize is the plaintext byte count, authenticated by the header MAC.
+                val totalSize = header.totalSize
 
-                // ── 2. Read filename preamble ─────────────────────────────────
-                val nameLenBytes = inp.readFully(4) ?: return@withContext
-                val nameLen = nameLenBytes.readUInt32BE(0).toInt()
-                fileName = if (nameLen in 1..2048) {
-                    inp.readFully(nameLen)?.toString(Charsets.UTF_8) ?: expectedFilename
-                } else {
-                    expectedFilename
+                // ── 2. File name (authenticated; MediaStore sanitizes it further) ──
+                if (header.fileName.isNotEmpty()) {
+                    fileName = header.fileName.toString(Charsets.UTF_8)
                 }
-
-                // ── 3. Open decryption key ────────────────────────────────────
-                val hexKey = DeviceManager.getEncryptionKey(context)
-                val keyBytes = hexKey?.chunked(2)?.map { it.toInt(16).toByte() }?.toByteArray()
-                if (keyBytes == null) {
-                    Log.e(TAG, "No encryption key — cannot decrypt file"); return@withContext
-                }
-                val secretKey = javax.crypto.spec.SecretKeySpec(keyBytes, "AES")
-                val cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
 
                 // ── 4. Choose destination based on payload type ───────────────────
                 val isImagePayload = typeCode == 0x02.toByte()
@@ -310,62 +293,27 @@ object AndroidTcpReceiver {
                 var lastBytes = 0L
                 
                 outputStream.use { out ->
-                    if (isUltraFast) {
-                        // UltraFast mode: Mac sends raw bytes with no chunk-length prefix
-                        // and no AES-GCM encryption envelope — read directly into file.
-                        val buf = ByteArray(1024 * 1024)
-                        while (received < totalSize && !isCancelled) {
-                            val toRead = minOf(buf.size.toLong(), totalSize - received).toInt()
-                            val n = inp.read(buf, 0, toRead)
-                            if (n <= 0) break
-                            out.write(buf, 0, n)
-                            received += n
+                    // Each chunk must have exactly the length the header implies and must open
+                    // under AAD bound to this session, type, size and index; anything else throws.
+                    received = TcpFrameProtocol.readChunks(inp, header, rootKey, isCancelled = { isCancelled }) { decrypted ->
+                        out.write(decrypted)
+                        val done = received + decrypted.size
+                        received = done
 
-                            val now = System.currentTimeMillis()
-                            val dt = (now - lastUpdate) / 1000.0
-                            if (dt >= 0.2) {
-                                val progress = if (totalSize > 0) received.toDouble() / totalSize else 1.0
-                                _receiveProgress.value = progress.toFloat()
-                                val db = received - lastBytes
-                                val speedMBs = (db / (1024.0 * 1024.0)) / dt
-                                _receiveSpeedString.value = String.format(java.util.Locale.US, "%.1f MB/s", speedMBs)
-                                if (now - lastNotifTime >= 1000) {
-                                    showProgressNotification(context, fileName, (progress * 100).toInt(), totalSize)
-                                    lastNotifTime = now
-                                }
-                                lastUpdate = now
-                                lastBytes = received
+                        val now = System.currentTimeMillis()
+                        val dt = (now - lastUpdate) / 1000.0
+                        if (dt >= 0.2) {
+                            val progress = if (totalSize > 0) done.toDouble() / totalSize else 1.0
+                            _receiveProgress.value = progress.toFloat()
+                            val db = done - lastBytes
+                            val speedMBs = (db / (1024.0 * 1024.0)) / dt
+                            _receiveSpeedString.value = String.format(java.util.Locale.US, "%.1f MB/s", speedMBs)
+                            if (now - lastNotifTime >= 1000) {
+                                showProgressNotification(context, fileName, (progress * 100).toInt(), totalSize)
+                                lastNotifTime = now
                             }
-                        }
-                    } else {
-                        // Standard encrypted mode: [chunkLen(4) + nonce(12) + ciphertext + GCM_tag(16)]
-                        while (received < totalSize && !isCancelled) {
-                            val chunkLenBytes = inp.readFully(4) ?: break
-                            val chunkLen = chunkLenBytes.readUInt32BE(0).toInt()
-                            if (chunkLen <= 0 || chunkLen > 5_000_000) {
-                                Log.e(TAG, "Invalid chunk length: $chunkLen"); break
-                            }
-
-                            val encrypted = inp.readFully(chunkLen) ?: break
-                            val decrypted = decryptChunk(encrypted, cipher, secretKey) ?: break
-                            out.write(decrypted)
-                            received += decrypted.size
-
-                            val now = System.currentTimeMillis()
-                            val dt = (now - lastUpdate) / 1000.0
-                            if (dt >= 0.2) {
-                                val progress = if (totalSize > 0) received.toDouble() / totalSize else 1.0
-                                _receiveProgress.value = progress.toFloat()
-                                val db = received - lastBytes
-                                val speedMBs = (db / (1024.0 * 1024.0)) / dt
-                                _receiveSpeedString.value = String.format(java.util.Locale.US, "%.1f MB/s", speedMBs)
-                                if (now - lastNotifTime >= 1000) {
-                                    showProgressNotification(context, fileName, (progress * 100).toInt(), totalSize)
-                                    lastNotifTime = now
-                                }
-                                lastUpdate = now
-                                lastBytes = received
-                            }
+                            lastUpdate = now
+                            lastBytes = done
                         }
                     }
                 }
@@ -442,20 +390,6 @@ object AndroidTcpReceiver {
         }
     }
 
-
-    // ── AES-GCM decryption ────────────────────────────────────────────────────
-
-    private fun decryptChunk(data: ByteArray, cipher: Cipher, key: SecretKeySpec): ByteArray? {
-        return try {
-            if (data.size <= 12) return null
-            val spec = javax.crypto.spec.GCMParameterSpec(128, data, 0, 12)
-            cipher.init(Cipher.DECRYPT_MODE, key, spec)
-            cipher.doFinal(data, 12, data.size - 12)
-        } catch (e: Exception) {
-            Log.e(TAG, "Chunk decryption failed", e)
-            null
-        }
-    }
 
     // ── Notifications ─────────────────────────────────────────────────────────
 
@@ -552,30 +486,4 @@ object AndroidTcpReceiver {
             null
         }
     }
-}
-
-// ── Stream / Data helpers ─────────────────────────────────────────────────────
-
-private fun java.io.InputStream.readFully(length: Int): ByteArray? {
-    val buf = ByteArray(length)
-    var offset = 0
-    while (offset < length) {
-        val read = read(buf, offset, length - offset)
-        if (read < 0) return null
-        offset += read
-    }
-    return buf
-}
-
-private fun ByteArray.readUInt32BE(offset: Int): Long {
-    return ((this[offset].toLong() and 0xFF) shl 24) or
-           ((this[offset + 1].toLong() and 0xFF) shl 16) or
-           ((this[offset + 2].toLong() and 0xFF) shl 8) or
-           (this[offset + 3].toLong() and 0xFF)
-}
-
-private fun ByteArray.readInt64BE(offset: Int): Long {
-    var result = 0L
-    for (i in 0..7) result = (result shl 8) or (this[offset + i].toLong() and 0xFF)
-    return result
 }

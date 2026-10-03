@@ -1,0 +1,154 @@
+rules_version = '2';
+
+// ClipSync Firestore security rules — least privilege.
+//
+// Authorization model: every protected document belongs to a pairing, and only Firebase
+// identities listed in that pairing's `members` may touch it. Nothing is authorized by
+// knowing a pairing ID, macId, device ID, document path, or the (public) Firebase config.
+//
+// Membership bootstrap (no secret ever reaches Firestore):
+//   1. The Mac signs in anonymously and puts its UID in the pairing QR code (alongside the
+//      pairing key, which never leaves the two devices).
+//   2. The phone creates pairings/{id} as its only member, naming the Mac in `macUid` and
+//      storing `proof` = HMAC(HKDF(pairing key, "ClipSync/Firestore/Pairing/v1"),
+//      pairingId ‖ androidUid ‖ macUid ‖ nonce).
+//   3. The Mac finds documents addressed to its UID, verifies `proof` locally with the
+//      pairing key, and only then adds itself to `members`. Rules guarantee only the named
+//      Mac can join, and only once; the proof stops a stranger who knows the Mac's UID from
+//      tricking it into a fake pairing.
+//
+// Cloud Functions use the Admin SDK and are NOT constrained by these rules.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function pairingPath(pairingId) {
+      return /databases/$(database)/documents/pairings/$(pairingId);
+    }
+
+    // True if the caller is a member of the (existing) pairing.
+    function isMember(pairingId) {
+      return signedIn()
+        && pairingId is string
+        && exists(pairingPath(pairingId))
+        && request.auth.uid in get(pairingPath(pairingId)).data.members;
+    }
+
+    function isShortString(v, max) {
+      return v is string && v.size() > 0 && v.size() <= max;
+    }
+
+    // ── pairings ────────────────────────────────────────────────────────────
+    match /pairings/{pairingId} {
+      // Readable by members, and by the Mac it is addressed to (so it can find and verify
+      // a pending pairing). Queries must filter on members/macUid accordingly.
+      allow get, list: if signedIn()
+        && (request.auth.uid in resource.data.members
+            || resource.data.macUid == request.auth.uid);
+
+      // Only the phone creates a pairing, as its sole member, naming one other UID.
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly([
+             'pairingId', 'version', 'members', 'androidUid', 'macUid', 'proof', 'proofNonce',
+             'androidDeviceId', 'androidDeviceName', 'macDeviceId', 'macId', 'macDeviceName',
+             'createdAt', 'timestamp', 'status'])
+        && request.resource.data.keys().hasAll([
+             'pairingId', 'version', 'members', 'androidUid', 'macUid', 'proof', 'proofNonce',
+             'timestamp', 'status'])
+        && request.resource.data.pairingId == pairingId
+        && request.resource.data.version == 2
+        && request.resource.data.members == [request.auth.uid]
+        && request.resource.data.androidUid == request.auth.uid
+        && isShortString(request.resource.data.macUid, 128)
+        && request.resource.data.macUid != request.auth.uid
+        && request.resource.data.proof is string && request.resource.data.proof.size() == 64
+        && request.resource.data.proofNonce is string && request.resource.data.proofNonce.size() == 32
+        && request.resource.data.status == 'pending'
+        && request.resource.data.timestamp == request.time;
+
+      allow update: if signedIn() && (
+        // The addressed Mac joins exactly once (after verifying `proof` locally).
+        (request.auth.uid == resource.data.macUid
+          && !(request.auth.uid in resource.data.members)
+          && resource.data.members.size() == 1
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['members', 'status'])
+          && request.resource.data.members.size() == 2
+          && request.resource.data.members[0] == resource.data.members[0]
+          && request.resource.data.members[1] == request.auth.uid
+          && request.resource.data.status == 'active')
+        ||
+        // A member may only mark the pairing active.
+        (request.auth.uid in resource.data.members
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])
+          && request.resource.data.status == 'active')
+      );
+
+      // Either member may unpair.
+      allow delete: if signedIn() && request.auth.uid in resource.data.members;
+    }
+
+    // ── clipboardItems (AES-GCM ciphertext) ─────────────────────────────────
+    match /clipboardItems/{itemId} {
+      allow get, list: if isMember(resource.data.pairingId);
+
+      allow create: if isMember(request.resource.data.pairingId)
+        && request.resource.data.keys().hasOnly(['content', 'pairingId', 'sourceDeviceId', 'sourceUid', 'timestamp', 'type'])
+        && request.resource.data.keys().hasAll(['content', 'pairingId', 'sourceUid', 'timestamp', 'type'])
+        && request.resource.data.sourceUid == request.auth.uid
+        && isShortString(request.resource.data.content, 1000000)
+        && request.resource.data.type == 'text'
+        && request.resource.data.timestamp == request.time
+        && (!('sourceDeviceId' in request.resource.data) || isShortString(request.resource.data.sourceDeviceId, 256));
+
+      allow delete: if isMember(resource.data.pairingId);
+      allow update: if false;
+    }
+
+    // ── notifications (encrypted OTPs) ──────────────────────────────────────
+    match /notifications/{notificationId} {
+      allow get, list: if isMember(resource.data.pairingId);
+
+      allow create: if isMember(request.resource.data.pairingId)
+        && request.resource.data.keys().hasOnly(['type', 'encryptedOTP', 'pairingId', 'sourceDeviceId', 'sourceDeviceName', 'sourceUid', 'timestamp'])
+        && request.resource.data.keys().hasAll(['type', 'encryptedOTP', 'pairingId', 'sourceUid', 'timestamp'])
+        && request.resource.data.type == 'OTP_NOTIFICATION'
+        && request.resource.data.sourceUid == request.auth.uid
+        && isShortString(request.resource.data.encryptedOTP, 4096)
+        && request.resource.data.timestamp == request.time
+        && (!('sourceDeviceId' in request.resource.data) || isShortString(request.resource.data.sourceDeviceId, 256))
+        && (!('sourceDeviceName' in request.resource.data) || isShortString(request.resource.data.sourceDeviceName, 256));
+
+      allow delete: if isMember(resource.data.pairingId);
+      allow update: if false;
+    }
+
+    // ── fcmTokens/{uid}: each identity manages only its own token ──────────
+    // Never readable by clients; Cloud Functions read it with the Admin SDK and only for a
+    // UID that is a member of the pairing the triggering item belongs to.
+    match /fcmTokens/{uid} {
+      allow get, list: if false;
+      allow create, update: if signedIn() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['token', 'platform', 'projectId', 'deviceId', 'deviceName', 'appVersion', 'lastUpdated', 'authProjectId', 'senderId', 'applicationId', 'pairingId'])
+        && isShortString(request.resource.data.token, 4096)
+        && request.resource.data.platform in ['android', 'mac']
+        && (!(request.resource.data.platform == 'android') || (
+             request.resource.data.keys().hasAll(['authProjectId', 'senderId', 'applicationId', 'pairingId', 'lastUpdated'])
+             && request.resource.data.projectId == 'clipsyncind'
+             && request.resource.data.authProjectId in ['clipsyncind', 'clipsync1-c3c3c']
+             && isShortString(request.resource.data.senderId, 32)
+             && isShortString(request.resource.data.applicationId, 256)
+             && isMember(request.resource.data.pairingId)
+             && request.resource.data.lastUpdated == request.time));
+      allow delete: if signedIn() && request.auth.uid == uid;
+    }
+
+    // Everything else (including the unused legacy fileTransfers collection) is denied.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

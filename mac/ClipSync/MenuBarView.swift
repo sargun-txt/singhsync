@@ -38,17 +38,17 @@ struct MenuBarView: View {
                 mainView
             }
         }
-        .alert("Ultra Fast Transfer (Unencrypted)", isPresented: $showingUltraFastWarning) {
+        .alert("Ultra Fast Transfer", isPresented: $showingUltraFastWarning) {
             Button("Cancel", role: .cancel) {
                 isUltraFastTransfer = false
-                WakeupReceiver.shared.pushToAndroid(json: ["type": "setting", "ultra_fast": false])
+                WakeupReceiver.shared.push(.setting, [.ultraFast: BleControlProtocol.u8(0)])
             }
-            Button("Enable", role: .destructive) {
+            Button("Enable") {
                 isUltraFastTransfer = true
-                WakeupReceiver.shared.pushToAndroid(json: ["type": "setting", "ultra_fast": true])
+                WakeupReceiver.shared.push(.setting, [.ultraFast: BleControlProtocol.u8(1)])
             }
         } message: {
-            Text("This will disable encryption for large file transfers to maximize speed. Only use this on a trusted home Wi-Fi network.")
+            Text("Uses larger chunks for big file transfers on fast Wi-Fi. Files stay end-to-end encrypted.")
         }
     }
 
@@ -241,7 +241,7 @@ struct MenuBarView: View {
                             showingUltraFastWarning = true
                         } else {
                             isUltraFastTransfer = false
-                            WakeupReceiver.shared.pushToAndroid(json: ["type": "setting", "ultra_fast": false])
+                            WakeupReceiver.shared.push(.setting, [.ultraFast: BleControlProtocol.u8(0)])
                         }
                     }
                 ))
@@ -368,9 +368,8 @@ struct MenuBarView: View {
                 .progressViewStyle(.linear)
                 .tint(iconColor)
                 
-            if !isUltraFastTransfer {
-                ShimmeringEncryptionBadge()
-            }
+            // Every transfer is encrypted, including Ultra Fast.
+            ShimmeringEncryptionBadge()
         }
         .padding(.horizontal, 16)
         .padding(.top, 10)

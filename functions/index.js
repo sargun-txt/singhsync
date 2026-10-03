@@ -1,6 +1,7 @@
 const { onSchedule } = require("firebase-functions/v2/scheduler");
 const { onDocumentCreated } = require("firebase-functions/v2/firestore");
 const admin = require("firebase-admin");
+const {resolveWakeupTarget, resolveTokenRoute, wakeupMessage, TOKEN_MAX_AGE_MS} = require("./routing");
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -115,85 +116,86 @@ exports.cleanupNotifications = onSchedule({
 /**
  * Triggers when a new clipboard item is created in Firestore.
  * This happens when BLE/TCP fails and the device falls back to Cloud Sync.
- * The function looks up the pairing and sends a silent `wake_up` push
- * to the destination device so it knows to fetch the new clipboard item.
+ * The function sends a silent `wake_up` push to the other member of the
+ * pairing so it knows to fetch the new clipboard item.
+ *
+ * Runs with the Admin SDK, which bypasses Firestore security rules, so the
+ * client-written item and pairing are re-validated here (see routing.js):
+ * routing uses only the pairing's authenticated `members` UIDs, never
+ * client-supplied device IDs, and tokens are read from fcmTokens/{uid}.
  */
 exports.notifyPairedDevice = onDocumentCreated("clipboardItems/{docId}", async (event) => {
   const snapshot = event.data;
   if (!snapshot) return;
 
-  const data = snapshot.data();
-  const pairingId = data.pairingId;
-  const sourceDeviceId = data.sourceDeviceId;
-
-  if (!pairingId || !sourceDeviceId) {
-    console.log("Missing pairingId or sourceDeviceId. Skipping push.");
+  const item = snapshot.data();
+  if (typeof item.pairingId !== "string" || item.pairingId.length === 0 ||
+      item.pairingId.length > 128) {
+    console.log("Invalid pairingId on clipboard item. Skipping push.");
     return;
   }
 
-  // 1. Fetch the pairing document to find the destination device ID
-  const pairingDoc = await db.collection("pairings").doc(pairingId).get();
+  const pairingDoc = await db.collection("pairings").doc(item.pairingId).get();
   if (!pairingDoc.exists) {
-    console.log(`Pairing document not found for ID: ${pairingId}`);
+    console.log("Pairing document not found. Skipping push.");
     return;
   }
 
-  const pairingData = pairingDoc.data();
-  // Identify the destination device (the one that didn't send the clip)
-  let destinationDeviceId = null;
-  
-  // Note: pairingData contains macDeviceId and androidDeviceId
-  if (sourceDeviceId === pairingData.macDeviceId) {
-    destinationDeviceId = pairingData.androidDeviceId;
-  } else if (sourceDeviceId === pairingData.androidDeviceId) {
-    destinationDeviceId = pairingData.macDeviceId;
-  }
-
-  if (!destinationDeviceId) {
-    console.log(`Could not determine destination device for source: ${sourceDeviceId}`);
+  const destinationUid =
+    resolveWakeupTarget(item, pairingDoc.data(), pairingDoc.id);
+  if (!destinationUid) {
+    console.log("Item is not from a member of a complete v2 pairing. Skipping push.");
     return;
   }
 
-  // 2. Lookup the destination device's FCM token
-  const tokenQuery = await db.collection("fcmTokens")
-    .where("deviceId", "==", destinationDeviceId)
-    .limit(1)
-    .get();
-
-  if (tokenQuery.empty) {
-    console.log(`No FCM token found for destination device: ${destinationDeviceId}`);
+  const tokenDoc = await db.collection("fcmTokens").doc(destinationUid).get();
+  const record = tokenDoc.exists ? tokenDoc.data() : null;
+  const regionalProjectId = admin.app().options.projectId ||
+    process.env.GCLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT;
+  const route = resolveTokenRoute(record && {
+    ...record,
+    lastUpdatedMs: record.lastUpdated && typeof record.lastUpdated.toMillis === "function" ?
+      record.lastUpdated.toMillis() : null,
+  }, item.pairingId, regionalProjectId, {
+    senderId: process.env.ANDROID_PUSH_SENDER_ID,
+    applicationId: process.env.ANDROID_PUSH_APP_ID,
+  });
+  if (!route) {
+    console.log("No current, correctly scoped FCM registration for the destination.");
     return;
   }
 
-  const fcmToken = tokenQuery.docs[0].data().token;
-  if (!fcmToken) {
-    console.log(`FCM token document found but token string is missing.`);
-    return;
-  }
-
-  // 3. Send the wake_up silent push via FCM
-  const message = {
-    token: fcmToken,
-    data: {
-      type: "wake_up" // Triggers local fetch on the destination device
-    },
-    // We do NOT include 'notification' block so it remains silent.
-    android: {
-      priority: "high" // Required to wake up dozing Android devices
-    },
-    apns: {
-      payload: {
-        aps: {
-          "content-available": 1 // Required to wake up macOS apps in background
-        }
-      }
-    }
-  };
-
+  // ADC must be explicitly granted FCM send permission in route.projectId.
+  // This named app changes only the FCM endpoint; regional Firestore remains `db`.
+  const sender = route.projectId === regionalProjectId ? admin.app() :
+    (admin.apps.find((app) => app && app.name === `push-${route.projectId}`) ||
+      admin.initializeApp({
+        credential: admin.credential.applicationDefault(),
+        projectId: route.projectId,
+      }, `push-${route.projectId}`));
   try {
-    await admin.messaging().send(message);
-    console.log(`Successfully sent wake_up push to device: ${destinationDeviceId}`);
+    await admin.messaging(sender).send(wakeupMessage(route.token));
+    console.log("Sent wake_up push to the other pairing member.");
   } catch (error) {
-    console.error(`Error sending wake_up push to device: ${destinationDeviceId}`, error);
+    console.error("Error sending wake_up push.", error.code || "");
+    if (error.code === "messaging/registration-token-not-registered") {
+      // Do not remove a newer refreshed token that arrived during this send.
+      await db.runTransaction(async (transaction) => {
+        const latest = await transaction.get(tokenDoc.ref);
+        if (latest.exists && latest.data().token === route.token &&
+            latest.data().projectId === route.projectId) transaction.delete(tokenDoc.ref);
+      });
+    }
   }
+});
+
+// Offline cleanup/reinstall can leave unreachable identities. Expire their registrations.
+exports.cleanupFCMTokens = onSchedule("every 24 hours", async () => {
+  const cutoff = admin.firestore.Timestamp.fromMillis(Date.now() - TOKEN_MAX_AGE_MS);
+  const old = await db.collection("fcmTokens").where("lastUpdated", "<", cutoff).limit(100).get();
+  await Promise.all(old.docs.map((doc) => db.runTransaction(async (transaction) => {
+    const latest = await transaction.get(doc.ref);
+    if (latest.exists && latest.data().lastUpdated &&
+        latest.data().lastUpdated.toMillis() < cutoff.toMillis()) transaction.delete(doc.ref);
+  })));
 });

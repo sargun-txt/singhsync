@@ -15,7 +15,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import org.json.JSONObject
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -27,9 +26,10 @@ import javax.crypto.spec.SecretKeySpec
  *   1. [start] is called after pairing/BLE connection.
  *   2. Connects to the Mac's GATT server, discovers services.
  *   3. Subscribes to SEND_REQUEST_CHAR (C11C5AC3) by writing CCCD descriptor.
- *   4. [onCharacteristicChanged] fires whenever Mac calls updateValue():
- *      - type=="text"        → decrypt → write to clipboard
- *      - type=="file_incoming" → spin up AndroidTcpReceiver → send tcp_ready ACK via WAKEUP_CHAR
+ *   4. [onCharacteristicChanged] fires whenever Mac calls updateValue(). Every value must be an
+ *      authenticated BLE v2 envelope (see [BleControlProtocol]); anything else is ignored:
+ *      - text          → decrypt → write to clipboard
+ *      - file_incoming → spin up AndroidTcpReceiver → send tcp_ready ACK via WAKEUP_CHAR
  *   5. On disconnect, retries up to 3 times with 2-second backoff.
  */
 object MacPushReceiver {
@@ -219,23 +219,25 @@ object MacPushReceiver {
     // ── Push handler ─────────────────────────────────────────────────────────
 
     private fun handlePush(context: Context, gatt: BluetoothGatt, value: ByteArray) {
-        val raw = try { JSONObject(String(value, Charsets.UTF_8)) } catch (e: Exception) {
-            Log.e(TAG, "Invalid JSON from Mac push: ${String(value, Charsets.UTF_8)}", e)
-            return
-        }
-        val isDiagnosticAck = raw.optBoolean("diagnostic_ack", false)
-        if (isDiagnosticAck) {
-            context.sendBroadcast(android.content.Intent("com.bunty.clipsync.DIAGNOSTIC_ACK"))
-            return
+        // Authenticate first: nothing below runs for a forged, replayed or malformed message.
+        val result = AndroidBle.inbound.process(
+            value, AndroidBle.rootKey(context), System.currentTimeMillis(), AndroidBleInbound.NOTIFICATION_TYPES)
+        val msg = when (result) {
+            is AndroidBleInbound.Result.Rejected -> {
+                Log.w(TAG, "Rejected BLE push: ${result.reason}")
+                AndroidBle.noteIfLegacyPeer(context, value)
+                return
+            }
+            is AndroidBleInbound.Result.Accepted -> result.message
         }
 
-        val type = raw.optString("type", "")
-
-        when (type) {
-            "text" -> {
-                val base64Content = raw.optString("content", "")
-                if (base64Content.isEmpty()) return
-                val decrypted = decryptBase64(context, base64Content) ?: run {
+        when (msg.type) {
+            BleControlProtocol.Type.DIAGNOSTIC_ACK -> {
+                context.sendBroadcast(
+                    android.content.Intent("com.bunty.clipsync.DIAGNOSTIC_ACK").setPackage(context.packageName))
+            }
+            BleControlProtocol.Type.PUSH_TEXT -> {
+                val decrypted = decryptBase64(context, msg.string(BleControlProtocol.Field.CONTENT)!!) ?: run {
                     Log.e(TAG, "Failed to decrypt text push from Mac")
                     return
                 }
@@ -244,29 +246,29 @@ object MacPushReceiver {
                 // Handle text/image payload and write to clipboard safely
                 ClipboardGhostActivity.copyToClipboard(context, text)
             }
-            "file_incoming" -> {
-                val size = raw.optLong("size", 0)
-                val filename = raw.optString("filename", "ClipSync_file")
-                val port = raw.optInt("port", 8766)
+            BleControlProtocol.Type.FILE_INCOMING -> {
+                val size = msg.uint(BleControlProtocol.Field.SIZE)!!
+                val filename = msg.string(BleControlProtocol.Field.FILE_NAME)!!
+                val port = msg.uint(BleControlProtocol.Field.PORT)!!.toInt()
+                if (port < 1024) { Log.w(TAG, "Rejected BLE push: privileged port"); return }
 
                 scope.launch {
                     // Spin up the TCP server and wait for it to be ready
                     val ready = AndroidTcpReceiver.start(context, port, size, filename)
                     if (ready) {
                         // Send tcp_ready ACK back to Mac via the WAKEUP_CHAR (Android→Mac write)
-                        sendTcpReadyAck(context, port)
+                        sendTcpReadyAck(context, port, replyTo = msg.messageId)
                     } else {
                         Log.e(TAG, "AndroidTcpReceiver failed to start")
                     }
                 }
             }
-            "text_incoming" -> {
-                // Large clipboard text that didn't fit in a BLE notify.
-                // Mac sends it over TCP using the same encrypted-chunk protocol as file
-                // transfers. We receive into memory and set the system clipboard directly
-                // instead of saving to Downloads.
-                val size = raw.optLong("size", 0)
-                val port = raw.optInt("port", 8766)
+            BleControlProtocol.Type.TEXT_INCOMING -> {
+                // Large clipboard text that didn't fit in a BLE notify; received over TCP and
+                // pushed to the system clipboard instead of saved to Downloads.
+                val size = msg.uint(BleControlProtocol.Field.SIZE)!!
+                val port = msg.uint(BleControlProtocol.Field.PORT)!!.toInt()
+                if (port < 1024) { Log.w(TAG, "Rejected BLE push: privileged port"); return }
 
                 scope.launch {
                     val ready = AndroidTcpReceiver.startForText(context, port, size) { text ->
@@ -276,31 +278,26 @@ object MacPushReceiver {
                     }
 
                     if (ready) {
-                        sendTcpReadyAck(context, port)
+                        sendTcpReadyAck(context, port, replyTo = msg.messageId)
                     } else {
                         Log.e(TAG, "AndroidTcpReceiver.startForText failed to start")
                     }
                 }
             }
-            "setting" -> {
-                if (raw.has("ultra_fast")) {
-                    val isUltraFast = raw.optBoolean("ultra_fast", false)
-                    DeviceManager.setUltraFastModeEnabled(context, isUltraFast)
-                }
+            BleControlProtocol.Type.SETTING -> {
+                // Schema allows exactly one field, ultra_fast, with value 0 or 1.
+                DeviceManager.setUltraFastModeEnabled(context, msg.uint(BleControlProtocol.Field.ULTRA_FAST) == 1L)
             }
-            "ping" -> {
+            BleControlProtocol.Type.PING -> {
                 // Mac is pre-pinging to get a fresh Android IP before starting a transfer.
-                // Reuse sendTcpReadyAck with payloadType "ping_ack" so Mac's lastAndroidIp
-                // is refreshed immediately — no doze guessing needed.
-                scope.launch { sendPingAck(context) }
+                // The ping_ack echoes this ping's messageId so the Mac accepts it only once.
+                scope.launch { sendPingAck(context, replyTo = msg.messageId) }
             }
-            else -> {
-                Log.w(TAG, "Unknown push type from Mac: $type")
-            }
+            else -> Log.w(TAG, "Rejected BLE push: unexpected type")
         }
     }
 
-    private fun sendPingAck(context: Context) {
+    private fun sendPingAck(context: Context, replyTo: ByteArray) {
         val androidIp = getLocalIp() ?: return
         val battery = try {
             val bm = context.getSystemService(Context.BATTERY_SERVICE) as android.os.BatteryManager
@@ -312,7 +309,8 @@ object MacPushReceiver {
             tcpPort = 8766,
             payloadSize = 0,
             payloadType = "ping_ack",
-            battery = if (battery >= 0) battery else null
+            battery = if (battery >= 0) battery else null,
+            replyTo = replyTo
         )
 
         WakeupPingSender.send(
@@ -323,7 +321,7 @@ object MacPushReceiver {
         )
     }
 
-    private fun sendTcpReadyAck(context: Context, port: Int) {
+    private fun sendTcpReadyAck(context: Context, port: Int, replyTo: ByteArray) {
         val androidIp = getLocalIp() ?: return
         val battery = try {
             val bm = context.getSystemService(Context.BATTERY_SERVICE) as android.os.BatteryManager
@@ -335,7 +333,8 @@ object MacPushReceiver {
             tcpPort = port,
             payloadSize = 0,
             payloadType = "tcp_ready",
-            battery = if (battery >= 0) battery else null
+            battery = if (battery >= 0) battery else null,
+            replyTo = replyTo
         )
 
         WakeupPingSender.send(

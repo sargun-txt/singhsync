@@ -81,6 +81,8 @@ firestore-debug.log
 ui-debug.log
 firestore.indexes.json
 firestore.rules
+# The least-privilege rules are versioned source (deploy is a separate, manual step).
+!firebase/firestore.rules
 storage.rules
 database.rules.json
 functions/node_modules/

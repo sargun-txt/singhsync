@@ -46,6 +46,13 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.alpha
 import androidx.compose.foundation.layout.Box
 
+private fun closeForLocalMode(context: android.content.Context) {
+    Toast.makeText(context, "Local sync selected. Reopen ClipSync and scan the QR code to continue.", Toast.LENGTH_LONG).show()
+    (context as? android.app.Activity)?.finishAffinity()
+    android.os.Process.killProcess(android.os.Process.myPid())
+}
+
+
 /**
  * The sole Activity in the ClipSync Android application.
  *
@@ -61,6 +68,7 @@ import androidx.compose.foundation.layout.Box
  * The animated [MeshBackground] is instantiated once inside [ClipSyncNavigation] and persists
  * across all navigation transitions so the gradient never resets or flickers between screens.
  */
+
 class MainActivity : ComponentActivity() {
 
     /**
@@ -274,9 +282,12 @@ fun ClipSyncNavigation(startDestination: String, showUpdateDialogOnStart: Boolea
                 SyncModeScreen(
                     onModeSelected = { mode ->
                         // Persist the selected sync mode for use throughout the pairing flow.
-                        DeviceManager.setSyncMode(context, mode)
-                        navController.navigate("bluetooth") {
-                            popUpTo("syncmode") { inclusive = false }
+                        if (DeviceManager.setSyncMode(context, mode)) {
+                            closeForLocalMode(context)
+                        } else {
+                            navController.navigate("bluetooth") {
+                                popUpTo("syncmode") { inclusive = false }
+                            }
                         }
                     }
                 )
@@ -335,7 +346,10 @@ fun ClipSyncNavigation(startDestination: String, showUpdateDialogOnStart: Boolea
                                 showMismatchDialog = false
                                 val data = pendingParsedData
                                 if (data != null) {
-                                    DeviceManager.setSyncMode(context, macSyncMode)
+                                    if (DeviceManager.setSyncMode(context, macSyncMode)) {
+                                        closeForLocalMode(context)
+                                        return@TextButton
+                                    }
 
                                     if (DeviceManager.getSyncMode(context) == "local") {
                                         DeviceManager.saveLocalPairingFromQr(context, data)
@@ -357,6 +371,7 @@ fun ClipSyncNavigation(startDestination: String, showUpdateDialogOnStart: Boolea
                                             context = context,
                                             qrData = data,
                                             onSuccess = {
+                                                scope.launch { FCMTokenManager.registerFCMToken(context) }
                                                 scope.launch {
                                                     navController.navigate("localnetwork") {
                                                         popUpTo("landing") { inclusive = true }
@@ -401,11 +416,7 @@ fun ClipSyncNavigation(startDestination: String, showUpdateDialogOnStart: Boolea
                             // This ensures all subsequent Firestore operations hit the correct
                             // regional database instance.
                             val qrRegion = parsedData["serverRegion"] as? String ?: "IN"
-                            val initializedRegion = DeviceManager.initializedRegion
-
-                            if (qrRegion != initializedRegion) {
-                                DeviceManager.setTargetRegion(context, qrRegion)
-                            }
+                            DeviceManager.setTargetRegion(context, qrRegion)
 
                             // Persist the sync mode received from the Mac's QR code.
                             // This is the mode that was set on the Mac — both devices must match.
@@ -437,6 +448,7 @@ fun ClipSyncNavigation(startDestination: String, showUpdateDialogOnStart: Boolea
                                     context = context,
                                     qrData = parsedData,
                                     onSuccess = {
+                                        scope.launch { FCMTokenManager.registerFCMToken(context) }
                                         scope.launch {
                                             // Navigate to local-network setup screen first,
                                             // then proceed to connection screen when done.

@@ -13,7 +13,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import org.json.JSONObject
 import java.util.UUID
 
 /**
@@ -36,26 +35,89 @@ data class WakeupPing(
     val battery: Int? = null,
     val network: String? = null,
     val deviceName: String? = null,
-    val isDiagnostic: Boolean = false
+    val isDiagnostic: Boolean = false,
+    /** messageId of the Mac request this answers (required for ping_ack / tcp_ready). */
+    val replyTo: ByteArray? = null
 ) {
-    fun toJsonBytes(): ByteArray = JSONObject().apply {
-        if (isDiagnostic) {
-            put("diagnostic", true)
-        }
+    /** The authenticated BLE message type for [payloadType] (or diagnostic). */
+    fun messageType(): BleControlProtocol.Type? =
+        if (isDiagnostic) BleControlProtocol.Type.DIAGNOSTIC
+        else BleControlProtocol.Type.forAndroidPayloadType(payloadType)
+
+    /** TLV fields for the BLE v2 envelope. Free text is cleaned and length-limited. */
+    fun toFields(): Map<BleControlProtocol.Field, ByteArray> {
+        val f = LinkedHashMap<BleControlProtocol.Field, ByteArray>()
         if (directPayload != null) {
-            put("d", directPayload)
-            put("t", payloadType)
-            put("s", payloadSize)
+            f[BleControlProtocol.Field.DIRECT_PAYLOAD] = BleControlProtocol.utf8(directPayload)
         } else {
-            put("ip", localIp)
-            put("p",  tcpPort)
-            put("s",  payloadSize)
-            put("t",  payloadType)
+            if (localIp.isNotEmpty() && BleControlProtocol.isValidIpv4OrEmpty(localIp)) {
+                f[BleControlProtocol.Field.IP] = BleControlProtocol.utf8(localIp)
+            }
+            if (tcpPort in 1..65535) f[BleControlProtocol.Field.PORT] = BleControlProtocol.u16(tcpPort)
         }
-        if (battery != null) put("b", battery)
-        if (network != null) put("n", network)
-        if (deviceName != null) put("dev", deviceName)
-    }.toString().toByteArray(Charsets.UTF_8)
+        f[BleControlProtocol.Field.SIZE] = BleControlProtocol.i64(payloadSize.coerceAtLeast(0))
+        if (battery != null && battery in 0..100) f[BleControlProtocol.Field.BATTERY] = BleControlProtocol.u8(battery)
+        network?.let { cleanText(it, 128) }?.let { f[BleControlProtocol.Field.NETWORK] = it }
+        deviceName?.let { cleanText(it, 128) }?.let { f[BleControlProtocol.Field.DEVICE_NAME] = it }
+        replyTo?.let { f[BleControlProtocol.Field.REPLY_TO] = it }
+        return f
+    }
+
+    private fun cleanText(s: String, maxBytes: Int): ByteArray? {
+        val out = StringBuilder()
+        var bytes = 0
+        for (ch in s.filterNot { Character.getType(it) == Character.CONTROL.toInt() }) {
+            val n = ch.toString().toByteArray(Charsets.UTF_8).size
+            if (bytes + n > maxBytes) break
+            out.append(ch)
+            bytes += n
+        }
+        return if (out.isEmpty()) null else out.toString().toByteArray(Charsets.UTF_8)
+    }
+}
+
+/**
+ * Android's BLE security state: the shared inbound gate (one bounded replay cache for all
+ * Mac → Android messages) and the pairing key lookup.
+ */
+object AndroidBle {
+    val inbound = AndroidBleInbound()
+
+    fun rootKey(context: Context): ByteArray? =
+        DeviceManager.getEncryptionKey(context)?.let {
+            try { TcpFrameProtocol.rootKey(it) } catch (e: TcpFrameProtocol.FrameException) { null }
+        }
+
+    /** Authenticated envelope for [ping], or null if not paired / the type is unknown. */
+    fun envelopeFor(context: Context, ping: WakeupPing): ByteArray? {
+        val rootKey = rootKey(context) ?: return null
+        val type = ping.messageType() ?: return null
+        return BleControlProtocol.encode(
+            type, ping.toFields(), BleControlProtocol.newMessageId(), System.currentTimeMillis(),
+            BleControlProtocol.authKey(rootKey))
+    }
+
+    @Volatile private var legacyPeerNoticeShown = false
+
+    /**
+     * An old (pre-v2) Mac sends plain JSON instead of an authenticated envelope. It is never
+     * trusted or answered in the old format; the user is told once to update the Mac.
+     */
+    fun noteIfLegacyPeer(context: Context, value: ByteArray) {
+        if (legacyPeerNoticeShown || value.isEmpty() || value[0] != '{'.code.toByte()) return
+        legacyPeerNoticeShown = true
+        DeviceManager.notifySecurityError(context, "Update ClipSync on your Mac — this version can't sync with it securely.")
+    }
+
+    /** The Mac's LAN endpoint from a device-info read, only if the envelope verifies. */
+    fun verifiedMacEndpoint(context: Context, value: ByteArray): Pair<String, Int>? {
+        noteIfLegacyPeer(context, value)
+        val result = inbound.process(value, rootKey(context), System.currentTimeMillis(), AndroidBleInbound.DEVICE_INFO_TYPES)
+        val msg = (result as? AndroidBleInbound.Result.Accepted)?.message ?: return null
+        val ip = msg.string(BleControlProtocol.Field.IP) ?: return null
+        val port = msg.uint(BleControlProtocol.Field.PORT)?.toInt() ?: return null
+        return ip to port
+    }
 }
 
 // ── BLE Wakeup Sender ─────────────────────────────────────────────────────────
@@ -111,7 +173,15 @@ object WakeupPingSender {
             return
         }
 
-        val pingBytes = ping.toJsonBytes()
+        // Every control write is an authenticated v2 envelope; no key → nothing is sent.
+        val pingBytes = try {
+            AndroidBle.envelopeFor(context, ping)
+        } catch (e: BleControlProtocol.BleException) {
+            null
+        } ?: run {
+            onFailed("Not paired or unsupported message — BLE control message not sent")
+            return
+        }
 
         scope.launch {
             connectReadThenWrite(context, macAddress, pingBytes, ping, onSent, onFailed)
@@ -216,12 +286,16 @@ object WakeupPingSender {
             ) {
                 if (characteristic.uuid == DEVICE_NAME_CHAR_UUID) {
                     if (status == BluetoothGatt.GATT_SUCCESS) {
-                        val json = characteristic.value?.toString(Charsets.UTF_8) ?: ""
-                        val (ip, port) = parseIpAndPortFromJson(json)
-                        resolvedMacIp = ip
-                        resolvedMacPort = port
-                        if (resolvedMacIp.isNotEmpty()) {
+                        // Only an authenticated device-info envelope may change the saved endpoint.
+                        val endpoint = AndroidBle.verifiedMacEndpoint(context, characteristic.value ?: ByteArray(0))
+                        if (endpoint != null) {
+                            resolvedMacIp = endpoint.first
+                            resolvedMacPort = endpoint.second
                             DeviceManager.saveMacLocalEndpoint(context, resolvedMacIp, resolvedMacPort)
+                        } else {
+                            Log.w(TAG, "Device info not authenticated; using cached IP")
+                            resolvedMacIp = DeviceManager.getMacLocalIp(context) ?: ""
+                            resolvedMacPort = DeviceManager.getMacLocalPort(context)
                         }
                     } else {
                         Log.w(TAG, "DeviceName read failed (status=$status); will use cached IP")
@@ -250,12 +324,16 @@ object WakeupPingSender {
             ) {
                 if (characteristic.uuid == DEVICE_NAME_CHAR_UUID) {
                     if (status == BluetoothGatt.GATT_SUCCESS) {
-                        val json = value.toString(Charsets.UTF_8)
-                        val (ip, port) = parseIpAndPortFromJson(json)
-                        resolvedMacIp = ip
-                        resolvedMacPort = port
-                        if (resolvedMacIp.isNotEmpty()) {
+                        // Only an authenticated device-info envelope may change the saved endpoint.
+                        val endpoint = AndroidBle.verifiedMacEndpoint(context, value)
+                        if (endpoint != null) {
+                            resolvedMacIp = endpoint.first
+                            resolvedMacPort = endpoint.second
                             DeviceManager.saveMacLocalEndpoint(context, resolvedMacIp, resolvedMacPort)
+                        } else {
+                            Log.w(TAG, "Device info not authenticated; using cached IP")
+                            resolvedMacIp = DeviceManager.getMacLocalIp(context) ?: ""
+                            resolvedMacPort = DeviceManager.getMacLocalPort(context)
                         }
                     } else {
                         Log.w(TAG, "DeviceName read failed API33 (status=$status); using cached IP")
@@ -329,20 +407,6 @@ object WakeupPingSender {
             wakeupChar.value = data
             @Suppress("DEPRECATION")
             gatt.writeCharacteristic(wakeupChar)
-        }
-    }
-
-    /** Parse {"name":"...", "ip":"192.168.x.x", "port":8765} — returns the ip and port. */
-    fun parseIpAndPortFromJson(jsonStr: String): Pair<String, Int> {
-        return try {
-            val json = JSONObject(jsonStr)
-            val ip = json.optString("ip", "")
-            val port = json.optInt("port", LocalSyncManager.TCP_PORT)
-            Pair(ip, port)
-        } catch (_: Exception) {
-            // Legacy: plain text device name (no IP embedded) — return empty
-            Log.w(TAG, "DeviceName char is not JSON (legacy Mac?): $jsonStr")
-            Pair("", LocalSyncManager.TCP_PORT)
         }
     }
 }

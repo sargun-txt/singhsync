@@ -147,8 +147,9 @@ object BLEConnector {
                 status: Int
             ) {
                 if (status == BluetoothGatt.GATT_SUCCESS) {
+                    // Pre-pairing: the phone has no key yet, so the name is display-only.
                     @Suppress("DEPRECATION")
-                    val name = characteristic.value?.toString(Charsets.UTF_8) ?: "ClipSync Mac"
+                    val name = characteristic.value?.let { BleControlProtocol.unverifiedDisplayName(it) } ?: "ClipSync Mac"
                     continueHandshake(gatt, name)
                 } else {
                     fail("Failed to read DeviceName characteristic")
@@ -162,7 +163,8 @@ object BLEConnector {
                 status: Int
             ) {
                 if (status == BluetoothGatt.GATT_SUCCESS) {
-                    val name = value.toString(Charsets.UTF_8)
+                    // Pre-pairing: the phone has no key yet, so the name is display-only.
+                    val name = BleControlProtocol.unverifiedDisplayName(value) ?: "ClipSync Mac"
                     continueHandshake(gatt, name)
                 } else {
                     fail("Failed to read DeviceName characteristic")
@@ -178,7 +180,9 @@ object BLEConnector {
                     return
                 }
                 
-                val payload = "{\"type\":\"pair\"}".toByteArray(Charsets.UTF_8)
+                // Pre-pairing presence signal (no key exists yet). The Mac treats these exact
+                // bytes only as "a phone is here — show the QR code"; it never changes pairing state.
+                val payload = BleControlProtocol.LEGACY_PAIR_PRESENCE
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     gatt.writeCharacteristic(wakeupChar, payload, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE) // Mac processes writeWithoutResponse
                     succeed(name)

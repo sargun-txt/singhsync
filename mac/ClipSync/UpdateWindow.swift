@@ -13,7 +13,10 @@ struct UpdateWindow: View {
                 .foregroundColor(.accentColor)
                 .padding(.top, 20)
             
-            if updateManager.isDownloadComplete {
+            if let url = updateManager.handedOffUpdateURL {
+                // STATE 4: Verified app handed to the user
+                handedOffView(url: url)
+            } else if updateManager.isDownloadComplete {
                 // STATE 3: Ready to Install
                 readyToInstallView
             } else if updateManager.isDownloading {
@@ -71,15 +74,29 @@ struct UpdateWindow: View {
                 }
                 .controlSize(.large)
                 
-                Button(action: {
-                    updateManager.startDownload(release: release)
-                }) {
-                    Text("Download & Install")
-                        .frame(width: 140)
-                        .fontWeight(.medium)
+                if updateManager.canVerifyUpdates && release.downloadUrl != nil {
+                    Button(action: {
+                        updateManager.startDownload(release: release)
+                    }) {
+                        Text("Download & Verify")
+                            .frame(width: 140)
+                            .fontWeight(.medium)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                } else {
+                    // Unsigned (ad-hoc) builds can't verify a download: offer the release page only.
+                    Button(action: {
+                        updateManager.openReleasePage()
+                    }) {
+                        Text("Open Download Page")
+                            .frame(width: 140)
+                            .fontWeight(.medium)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .disabled(release.pageURL == nil)
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
             }
         }
     }
@@ -106,11 +123,11 @@ struct UpdateWindow: View {
     
     private var readyToInstallView: some View {
         VStack(spacing: 16) {
-            Text("Ready to Install")
+            Text("Verified Update Ready")
                 .font(.title2)
                 .fontWeight(.bold)
             
-            Text("The update has been downloaded and extracted successfully. The app must restart to complete the installation.")
+            Text("The new version is signed by the ClipSync developer. Click Show in Finder, quit ClipSync, then drag the new app into your Applications folder to replace the old one.")
                 .font(.body)
                 .multilineTextAlignment(.center)
                 .foregroundColor(.secondary)
@@ -129,9 +146,9 @@ struct UpdateWindow: View {
                 .controlSize(.large)
                 
                 Button(action: {
-                    updateManager.executeInstall()
+                    updateManager.installVerifiedUpdate()
                 }) {
-                    Text("Install & Relaunch")
+                    Text("Show in Finder")
                         .frame(width: 140)
                         .fontWeight(.bold)
                 }
@@ -142,6 +159,29 @@ struct UpdateWindow: View {
         .padding(.top, 20)
     }
     
+    private func handedOffView(url: URL) -> some View {
+        VStack(spacing: 16) {
+            Text("Almost Done")
+                .font(.title2)
+                .fontWeight(.bold)
+
+            Text("\(url.lastPathComponent) is in your Downloads folder. Quit ClipSync, drag it into Applications (replace the old version), then open it.")
+                .font(.body)
+                .multilineTextAlignment(.center)
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 20)
+
+            Spacer()
+
+            Button("Done") {
+                updateManager.cancelInstall()
+                UpdateWindowController.shared.closeWindow()
+            }
+            .controlSize(.large)
+        }
+        .padding(.top, 20)
+    }
+
     private var errorView: some View {
         VStack(spacing: 16) {
             Text("Update Failed")

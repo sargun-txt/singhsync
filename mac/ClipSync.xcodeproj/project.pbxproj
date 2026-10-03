@@ -15,6 +15,7 @@
 		BFF6981F2EFD6C6B0037416F /* FirebaseCore in Frameworks */ = {isa = PBXBuildFile; productRef = BFF6981E2EFD6C6B0037416F /* FirebaseCore */; };
 		BFF698212EFD6C6B0037416F /* FirebaseDatabase in Frameworks */ = {isa = PBXBuildFile; productRef = BFF698202EFD6C6B0037416F /* FirebaseDatabase */; };
 		BFF698232EFD6C6B0037416F /* FirebaseFirestore in Frameworks */ = {isa = PBXBuildFile; productRef = BFF698222EFD6C6B0037416F /* FirebaseFirestore */; };
+		BFA1C0012F80000000C11C5A /* FirebaseAuth in Frameworks */ = {isa = PBXBuildFile; productRef = BFA1C0022F80000000C11C5A /* FirebaseAuth */; };
 		BFF6982C2EFD70300037416F /* Lottie in Frameworks */ = {isa = PBXBuildFile; productRef = BFF6982B2EFD70300037416F /* Lottie */; };
 		EA4D5829D5462E0B8A83F9FE /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BE5E34C39BD00C8FE028E2FB /* Cocoa.framework */; };
 		F25A5820E3F86D28E4C5E193 /* SharedViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F87326091A4D00463502911 /* SharedViewController.swift */; };
@@ -73,6 +74,7 @@
 				BF9C469E3031BCFC00A32E54 /* FirebaseCrashlytics in Frameworks */,
 				BFF698212EFD6C6B0037416F /* FirebaseDatabase in Frameworks */,
 				BFF698232EFD6C6B0037416F /* FirebaseFirestore in Frameworks */,
+				BFA1C0012F80000000C11C5A /* FirebaseAuth in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -166,6 +168,7 @@
 				BFF6981E2EFD6C6B0037416F /* FirebaseCore */,
 				BFF698202EFD6C6B0037416F /* FirebaseDatabase */,
 				BFF698222EFD6C6B0037416F /* FirebaseFirestore */,
+				BFA1C0022F80000000C11C5A /* FirebaseAuth */,
 				BFF6982B2EFD70300037416F /* Lottie */,
 				BFE62CD52F34AF70009DE3D3 /* Shimmer */,
 				BF3F450D2F4C9D9000DECBEE /* FirebaseMessaging */,
@@ -603,6 +606,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = BFF6981B2EFD6C6B0037416F /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
 			productName = FirebaseFirestore;
+		};
+		BFA1C0022F80000000C11C5A /* FirebaseAuth */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = BFF6981B2EFD6C6B0037416F /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseAuth;
 		};
 		BFF6982B2EFD70300037416F /* Lottie */ = {
 			isa = XCSwiftPackageProductDependency;

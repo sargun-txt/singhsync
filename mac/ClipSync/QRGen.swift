@@ -201,6 +201,11 @@ struct QRGenScreen: View {
 
                         VStack(spacing: 10) {
                             Button(action: {
+                                // Cloud sign-in failed: the tile becomes the retry action.
+                                if qrGenerator.cloudAuthError != nil {
+                                    qrGenerator.generateQRCode()
+                                    return
+                                }
                                 withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
                                     isQREnlarged = true
                                 }
@@ -210,6 +215,16 @@ struct QRGenScreen: View {
                                         Image(nsImage: qrImage)
                                             .interpolation(.none)
                                             .resizable()
+                                    } else if let authError = qrGenerator.cloudAuthError {
+                                        VStack(spacing: 8) {
+                                            Text(authError)
+                                                .font(.system(size: 11))
+                                                .multilineTextAlignment(.center)
+                                                .foregroundColor(.secondary)
+                                            Text("Click to retry")
+                                                .font(.system(size: 11, weight: .semibold))
+                                        }
+                                        .padding(8)
                                     } else {
                                         ProgressView()
                                             .scaleEffect(1.5)
@@ -255,6 +270,19 @@ struct QRGenScreen: View {
                             Capsule()
                                 .fill(Color.black.opacity(0.3))
                         )
+                    }
+
+                    // Cloud pairing problems (sign-in, permission, "pair again" after the
+                    // security update) must be visible, not just logged.
+                    if !isLocalOnlyMode, let notice = pairingManager.repairNotice ?? pairingManager.pairingError {
+                        Text(notice)
+                            .font(.custom("SF Pro", size: 11))
+                            .foregroundColor(.white)
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(RoundedRectangle(cornerRadius: 8).fill(Color.black.opacity(0.35)))
                     }
                 }
                 .frame(width: 170)
@@ -487,8 +515,10 @@ struct QRGenScreen: View {
         if newRegion != currentRegion {
             UserDefaults.standard.set(newRegion, forKey: "server_region")
             UserDefaults.standard.synchronize()
-            // Only restart when user explicitly changes region — never on auto-detection at startup
-            if userInitiated {
+            // Restart when the user changes region, or when cloud pairing would otherwise use a
+            // different Firebase project than the one this process is signed in to (the QR code,
+            // macUid and pairing listener must all refer to the same project).
+            if userInitiated || (!isLocalOnlyMode && FirebaseManager.shared.configuredRegion != newRegion) {
                 restartApp()
             } else {
                 qrGenerator.generateQRCode()

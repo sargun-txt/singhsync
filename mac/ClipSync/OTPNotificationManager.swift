@@ -69,6 +69,18 @@ class OTPNotificationManager: ObservableObject {
             return
         }
 
+        // Firestore rules require a member identity; never listen without one.
+        guard FirebaseManager.shared.isAuthenticated else {
+            FirebaseManager.shared.withAuthenticatedUid { [weak self] result in
+                let delay: Double = (try? result.get()) != nil ? 0 : 10
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                    guard FirebaseManager.shared.isAuthenticated || retryCount < 5 else { return }
+                    self?.startListening(retryCount: retryCount + 1)
+                }
+            }
+            return
+        }
+
         listener?.remove()
 
         listener = FirebaseManager.shared.db
@@ -78,7 +90,8 @@ class OTPNotificationManager: ObservableObject {
             .addSnapshotListener { [weak self] snapshot, error in
                 guard let self = self else { return }
 
-                if error != nil {
+                if let error {
+                    if PairingManager.shared.handleCloudPermissionError(error) { return }
                     DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
                         self?.startListening(retryCount: 0)
                     }

@@ -1,5 +1,5 @@
 // FCMTokenManager.swift
-// Stores and removes the FCM device token in Firestore under fcmTokens/{deviceId}.
+// Stores and removes the FCM device token in Firestore under fcmTokens/{uid}.
 // Used so a Cloud Function or the Firebase console can look up tokens by device
 // to send targeted push notifications.
 
@@ -25,6 +25,10 @@ class FCMTokenManager {
             return
         }
 
+        // Tokens are stored per Firebase identity (fcmTokens/{uid}); rules let each identity
+        // manage only its own document, and no client can read tokens back.
+        guard let uid = await FirebaseManager.shared.authenticatedUid() else { return }
+        guard UserDefaults.standard.string(forKey: "sync_mode") != "local" else { return }
         let deviceId = DeviceManager.shared.getDeviceId()
         let deviceName = DeviceManager.shared.getFriendlyMacName()
 
@@ -42,9 +46,9 @@ class FCMTokenManager {
         ]
         
         do {
-            try await Firestore.firestore()
+            try await FirebaseManager.shared.db
                 .collection(COLLECTION_FCM_TOKENS)
-                .document(deviceId)
+                .document(uid)
                 .setData(tokenData, merge: true)
             
         } catch {
@@ -59,12 +63,12 @@ class FCMTokenManager {
             return
         }
 
-        let deviceId = DeviceManager.shared.getDeviceId()
+        guard let uid = FirebaseManager.shared.currentUid else { return }
         
         do {
-            try await Firestore.firestore()
+            try await FirebaseManager.shared.db
                 .collection(COLLECTION_FCM_TOKENS)
-                .document(deviceId)
+                .document(uid)
                 .delete()
             
         } catch {

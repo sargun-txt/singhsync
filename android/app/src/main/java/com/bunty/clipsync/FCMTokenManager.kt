@@ -2,134 +2,107 @@ package com.bunty.clipsync
 
 import android.content.Context
 import android.util.Log
-import com.google.firebase.firestore.SetOptions
+import com.google.firebase.FirebaseApp
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.FieldValue
+import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.messaging.FirebaseMessaging
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.tasks.await
 
-/**
- * Singleton responsible for the full lifecycle of an FCM (Firebase Cloud Messaging) token
- * on this Android device — from initial retrieval through Firestore persistence to deletion.
- *
- * Each device is identified by a stable [DeviceManager.getDeviceId] key. The corresponding
- * Firestore document in the `fcmTokens` collection carries enough metadata for the backend
- * (or Firebase Console) to target specific platforms, regions, or devices when sending pushes:
- *
- *   Field         | Example value
- *   --------------|-----------------------------
- *   token         | "dK3f…"  (the raw FCM token)
- *   platform      | "android"
- *   projectId     | "clipsyncind" | "clipsync1-c3c3c"
- *   deviceId      | stable unique device identifier
- *   deviceName    | "Pixel 7 Pro"
- *   appVersion    | "1.0.0"
- *   lastUpdated   | Firestore server timestamp
- *
- * Region-to-project mapping:
- *   US region  → Firebase project "clipsync1-c3c3c"
- *   All others → Firebase project "clipsyncind"
- */
+/** UID-owned registrations in regional Firestore; projectId always identifies the FCM issuer. */
 object FCMTokenManager {
-
-    // ── Logging / Firestore identifiers ────────────────────────────────────────
     private const val TAG = "FCMTokenManager"
-    private const val COLLECTION_FCM_TOKENS = "fcmTokens"
+    private val registrationLock = Mutex()
+    // Held only while enqueueing writes or changing persisted routing state, never across await.
+    internal val stateLock = Any()
 
-    /**
-     * Entry-point for FCM token registration, called once on every app launch from
-     * [MainActivity]. Fetches the current FCM registration token asynchronously and
-     * hands it off to [storeFCMToken] for Firestore persistence.
-     *
-     * The token is issued by Google Play Services and may rotate periodically; calling
-     * this on every launch ensures the stored token is always fresh.
-     *
-     * @param context Application context, forwarded to [storeFCMToken] for device resolution.
-     */
-    suspend fun registerFCMToken(context: Context) {
+    private fun currentBinding(context: Context): FcmTokenPolicy.Binding? {
+        if (DeviceManager.getSyncMode(context) != "hybrid") return null
+        val pairingId = DeviceManager.getPairingId(context) ?: return null
+        val app = CloudAuth.app(context)
+        val issuer = FirebaseApp.getInstance().options
+        val senderId = issuer.gcmSenderId ?: issuer.applicationId.split(':').getOrNull(1)
+        return FcmTokenPolicy.binding("hybrid", DeviceManager.getTargetRegion(context),
+            FirebaseAuth.getInstance(app).currentUser?.uid, pairingId,
+            app.options.projectId, issuer.projectId, senderId, issuer.applicationId)
+    }
+
+    private suspend fun authenticatedBinding(context: Context): FcmTokenPolicy.Binding? {
+        if (DeviceManager.getSyncMode(context) != "hybrid" || DeviceManager.getPairingId(context) == null) return null
+        val region = DeviceManager.getTargetRegion(context)
+        val pairingId = DeviceManager.getPairingId(context)
+        val uid = CloudAuth.awaitUid(context) ?: return null
+        val current = currentBinding(context) ?: return null
+        return current.takeIf { it.region == region && it.pairingId == pairingId && it.uid == uid }
+    }
+
+    /** Authentication completes before asking FCM to create/retrieve any token. */
+    suspend fun registerFCMToken(context: Context) = registrationLock.withLock {
         try {
+            val binding = authenticatedBinding(context) ?: return@withLock
             val token = FirebaseMessaging.getInstance().token.await()
-            storeFCMToken(context, token)
+            persist(context, binding, token)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to retrieve FCM token", e)
+            Log.e(TAG, "FCM registration failed")
         }
     }
 
-    /**
-     * Persists the given FCM token and associated device metadata to Firestore, then
-     * subscribes the device to the `all_devices` FCM topic so broadcast messages from
-     * the Firebase Console reach every registered device simultaneously.
-     *
-     * The document is written with [SetOptions.merge] so that any extra fields stored
-     * by other parts of the app are not overwritten — only the fields listed below are
-     * touched on each call.
-     *
-     * @param context Application context used to resolve the device ID, name, and region.
-     * @param token   The raw FCM registration token string returned by Firebase Messaging.
-     */
-    suspend fun storeFCMToken(context: Context, token: String) {
+    /** Only used for tokens delivered by the default-app FirebaseMessagingService callback. */
+    suspend fun storeFCMToken(context: Context, token: String) = registrationLock.withLock {
         try {
-            val deviceId = DeviceManager.getDeviceId(context)
-            val deviceName = DeviceManager.getAndroidDeviceName()
-            val targetRegion = DeviceManager.getTargetRegion(context)
-
-            // Each region maps to a separate Firebase project; the correct projectId must be
-            // stored alongside the token so cross-project messaging logic can route correctly.
-            val projectId = when (targetRegion) {
-                "US" -> "clipsync1-c3c3c"
-                else -> "clipsyncind"
-            }
-
-            // Assemble the token document. serverTimestamp() is used for lastUpdated so the
-            // value reflects Firebase server time, which is consistent across all clients.
-            val tokenData = hashMapOf(
-                "token" to token,
-                "platform" to "android",
-                "projectId" to projectId,
-                "deviceId" to deviceId,
-                "deviceName" to deviceName,
-                "appVersion" to "1.0.0",
-                "lastUpdated" to com.google.firebase.firestore.FieldValue.serverTimestamp()
-            )
-
-            // Use the stable deviceId as the document key so repeated calls simply update
-            // the existing record rather than creating duplicate token entries.
-            val db = FirestoreManager.getDb(context)
-            db.collection(COLLECTION_FCM_TOKENS)
-                .document(deviceId)
-                .set(tokenData, SetOptions.merge())
-                .await()
-
-            // Subscribing to "all_devices" enables sending a single FCM message from the
-            // Firebase Console that targets every device regardless of deviceId or region.
-            FirebaseMessaging.getInstance().subscribeToTopic("all_devices")
-                .addOnSuccessListener { }
-                .addOnFailureListener { Log.e(TAG, "Failed to subscribe to topic", it) }
+            val binding = authenticatedBinding(context) ?: return@withLock
+            persist(context, binding, token)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to store FCM token", e)
+            Log.e(TAG, "FCM refresh registration failed")
         }
     }
 
-    /**
-     * Removes this device's FCM token document from the `fcmTokens` Firestore collection.
-     *
-     * Should be called when the user logs out or explicitly unpairs the device so the
-     * backend can no longer push notifications to it. After this call, [registerFCMToken]
-     * must be invoked again (e.g. on the next sign-in) to re-enable push delivery.
-     *
-     * @param context Application context used to retrieve the stable device identifier.
-     */
+    private suspend fun persist(context: Context, binding: FcmTokenPolicy.Binding, token: String) {
+        if (!FcmTokenPolicy.isCurrent(binding, currentBinding(context))) return
+        val fields = FcmTokenPolicy.fields(binding, token) ?: return
+        val data = HashMap<String, Any>(fields).apply {
+            put("deviceId", DeviceManager.getDeviceId(context))
+            put("deviceName", DeviceManager.getAndroidDeviceName())
+            put("appVersion", context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "unknown")
+            put("lastUpdated", FieldValue.serverTimestamp())
+        }
+        // Capture this database and identity before suspension. Never write through a mutable region.
+        val app = CloudAuth.app(context)
+        val reference = FirebaseFirestore.getInstance(app).collection("fcmTokens").document(binding.uid)
+        val write = synchronized(stateLock) {
+            if (!FcmTokenPolicy.isCurrent(binding, currentBinding(context))) return
+            reference.set(data) // Replace stale metadata as well as the token.
+        }
+        write.await()
+        // DeviceManager enqueues deletion in the captured old project before any transition.
+        // No client read-back is used: token documents intentionally remain unreadable.
+
+    }
+
+    /** Initiated while still hybrid, before region/mode/pairing state changes. Never signs in. */
+    fun deleteStoredRegistration(context: Context) {
+        if (DeviceManager.getSyncMode(context) != "hybrid") return
+        try {
+            val appName = if (DeviceManager.getTargetRegion(context) == "US") "ClipSyncUS" else FirebaseApp.DEFAULT_APP_NAME
+            val app = FirebaseApp.getApps(context).firstOrNull { it.name == appName } ?: return
+            val uid = FirebaseAuth.getInstance(app).currentUser?.uid ?: return
+            FirebaseFirestore.getInstance(app).collection("fcmTokens").document(uid).delete()
+                .addOnFailureListener { Log.w(TAG, "FCM cleanup deferred to server expiry") }
+        } catch (e: Exception) {
+            Log.w(TAG, "FCM cleanup unavailable; server expiry will apply")
+        }
+    }
+
     suspend fun deleteFCMToken(context: Context) {
+        if (DeviceManager.getSyncMode(context) != "hybrid") return
         try {
-            val deviceId = DeviceManager.getDeviceId(context)
-            val db = FirestoreManager.getDb(context)
-
-            // Delete the entire token document; the device ID is the document path so this
-            // is a targeted, single-document operation with no risk of collateral deletions.
-            db.collection(COLLECTION_FCM_TOKENS)
-                .document(deviceId)
-                .delete()
-                .await()
+            val app = CloudAuth.app(context)
+            val uid = FirebaseAuth.getInstance(app).currentUser?.uid ?: return
+            FirebaseFirestore.getInstance(app).collection("fcmTokens").document(uid).delete().await()
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to delete FCM token", e)
+            Log.w(TAG, "FCM cleanup deferred to server expiry")
         }
     }
 }

@@ -31,9 +31,6 @@ struct HomeScreen: View {
     @State private var showUpdateAlert = false
     @State private var updateInfo: UpdateNotificationManager.UpdateInfo? = nil
 
-    #if DEBUG
-    @ObserveInjection var forceRedraw
-    #endif
 
     var body: some View {
         ZStack {
@@ -320,8 +317,11 @@ struct HomeScreen: View {
                 title: Text("Update Available 🚀"),
                 message: Text("Version \(updateInfo?.version ?? "Unknown") is now available!\n\n\(updateInfo?.releaseNotes ?? "")"),
                 primaryButton: .default(Text("Download")) {
+                    // Push-supplied URL: only ever open an HTTPS GitHub page in the browser —
+                    // never a file:// or app URL, and never run anything that was downloaded.
                     if let urlString = updateInfo?.downloadUrl,
-                       let url = URL(string: urlString) {
+                       let url = URL(string: urlString),
+                       UpdatePolicy.isAllowedDownloadURL(url) {
                         NSWorkspace.shared.open(url)
                     }
                     UpdateNotificationManager.shared.clearPendingUpdate()
@@ -339,7 +339,6 @@ struct HomeScreen: View {
         } message: {
             Text("This will disconnect your Android device and delete all pairing data. You'll need to scan the QR code again to reconnect.")
         }
-        .enableInjection()
     }
 
 
@@ -423,31 +422,6 @@ struct HomeScreen: View {
 }
 
 // MARK: - Supporting Views
-
-/// Frosted-glass card container used throughout HomeScreen.
-struct InnerGlassCard<Content: View>: View {
-    let content: Content
-
-
-    init(@ViewBuilder content: () -> Content) {
-        self.content = content()
-    }
-
-    var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .fill(Color.white.opacity(0.4))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 24, style: .continuous)
-                        .stroke(Color.white.opacity(0.3), lineWidth: 0.5)
-                )
-                .shadow(color: Color.black.opacity(0.1), radius: 8, x: 0, y: 4)
-
-            content
-        }
-    }
-}
-
 
 /// NSViewRepresentable wrapper that plays the `tick` Lottie animation once.
 struct TickLottieView: NSViewRepresentable {
@@ -697,58 +671,6 @@ struct CheckEncryptionCard: View {
     }
 }
 
-
-/// Single row in the clipboard history list. Content is masked until hovered.
-/// Image items show a compact label instead of a preview (RAM-friendly).
-struct ClipboardHistoryRow: View {
-    let item: ClipboardItem
-    let isHovered: Bool
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("Copied \(timeAgo(from: item.timestamp))")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(.black.opacity(0.5))
-                        .textCase(.uppercase)
-                    Spacer()
-                }
-
-                if item.isImage {
-                    // No preview — lightweight text label to save RAM.
-                    HStack(spacing: 6) {
-                        Text("📸")
-                            .font(.system(size: 14))
-                        Text("Image copiée")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundColor(.black.opacity(0.7))
-                    }
-                } else if isHovered {
-                    Text(item.content.prefix(100) + (item.content.count > 100 ? "..." : ""))
-                        .font(.system(size: 13))
-                        .foregroundColor(.black.opacity(0.9))
-                        .lineLimit(2)
-                        .transition(.opacity)
-                } else {
-                    Text("••••••••••••••••••••••••••••")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundColor(.black.opacity(0.3))
-                        .tracking(2)
-                        .lineLimit(1)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-
-    private func timeAgo(from date: Date) -> String {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .full
-        return formatter.localizedString(for: date, relativeTo: Date())
-    }
-}
 
 #Preview {
     HomeScreen()

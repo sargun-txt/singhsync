@@ -221,18 +221,18 @@ class ClipboardManager: ObservableObject {
         guard !isLocalOnlyMode else {
             return
         }
-        guard let pairingId = PairingManager.shared.pairingId else { return }
         let macDeviceId = DeviceManager.shared.getDeviceId()
+        let uid = FirebaseManager.shared.currentUid
+        if uid == nil {
+            // Sign in for next time; this copy is not uploaded (fail closed).
+            FirebaseManager.shared.withAuthenticatedUid { _ in }
+        }
 
-        guard let encryptedContent = encrypt(text) else { return }
-
-        let clipboardData: [String: Any] = [
-            "content": encryptedContent,
-            "timestamp": FieldValue.serverTimestamp(),
-            "pairingId": pairingId,
-            "sourceDeviceId": macDeviceId,
-            "type": "text"
-        ]
+        // Nil when there is no Firebase identity, no pairing, or encryption failed.
+        guard var clipboardData = CloudPairingAuth.clipboardItemFields(
+            uid: uid, pairingId: PairingManager.shared.pairingId,
+            encryptedContent: encrypt(text), deviceId: macDeviceId) else { return }
+        clipboardData["timestamp"] = FieldValue.serverTimestamp()
 
         db.collection("clipboardItems").addDocument(data: clipboardData) { error in
             if error != nil {
@@ -257,6 +257,18 @@ class ClipboardManager: ObservableObject {
             return
         }
 
+        // Firestore rules require a member identity; never listen without one.
+        guard FirebaseManager.shared.isAuthenticated else {
+            FirebaseManager.shared.withAuthenticatedUid { [weak self] result in
+                let delay: Double = (try? result.get()) != nil ? 0 : 10
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                    guard FirebaseManager.shared.isAuthenticated || retryCount < 5 else { return }
+                    self?.listenForAndroidClipboard(retryCount: retryCount + 1)
+                }
+            }
+            return
+        }
+
         stopListening()
         let macDeviceId = DeviceManager.shared.getDeviceId()
 
@@ -273,7 +285,8 @@ class ClipboardManager: ObservableObject {
 
                 if self.isSyncPaused || !self.syncToMac { return }
 
-                if error != nil {
+                if let error {
+                    if PairingManager.shared.handleCloudPermissionError(error) { return }
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
                         self?.listenForAndroidClipboard(retryCount: 0)
                     }

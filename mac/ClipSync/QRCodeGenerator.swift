@@ -16,6 +16,8 @@ class QRCodeGenerator: ObservableObject {
     @Published var qrImage: NSImage?
     @Published var pairingCode: String = ""
     @Published var currentPairingId: String = UserDefaults.standard.string(forKey: "ble_pairing_uuid") ?? ""
+    /// Set when cloud (hybrid) pairing cannot get a Firebase identity; no QR is shown then.
+    @Published var cloudAuthError: String?
 
     private let context = CIContext()
     private let filter = CIFilter.qrCodeGenerator()
@@ -35,10 +37,35 @@ class QRCodeGenerator: ObservableObject {
 
     /// Builds the JSON pairing payload, encodes it as a QR using CoreImage,
     /// and scales the result to a sharp NSImage.
+    ///
+    /// Cloud (hybrid) pairing needs this Mac's Firebase UID in the QR code so the phone can name
+    /// it in the pairing document; without a signed-in identity no QR is produced (fail closed).
     func generateQRCode() {
+        let syncMode = UserDefaults.standard.string(forKey: "sync_mode") ?? "hybrid"
+        guard syncMode != "local" else {
+            cloudAuthError = nil
+            buildQRCode(macUid: nil)
+            return
+        }
+        FirebaseManager.shared.withAuthenticatedUid { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                switch result {
+                case .success(let uid):
+                    self.cloudAuthError = nil
+                    self.buildQRCode(macUid: uid)
+                case .failure:
+                    self.qrImage = nil
+                    self.pairingCode = ""
+                    self.cloudAuthError = FirebaseManager.authFailureMessage
+                }
+            }
+        }
+    }
+
+    private func buildQRCode(macUid: String?) {
         let macDeviceId = DeviceManager.shared.getDeviceId()
         let macName = DeviceManager.shared.getMacName()
-        let currentRegion = UserDefaults.standard.string(forKey: "server_region") ?? "IN"
         // Read the sync mode selected by the user on the SyncMode screen.
         // Defaults to "hybrid" if none has been chosen yet.
         let syncMode = UserDefaults.standard.string(forKey: "sync_mode") ?? "hybrid"
@@ -63,8 +90,12 @@ class QRCodeGenerator: ObservableObject {
         ]
 
         if syncMode != "local" {
-            jsonDict["server"] = currentRegion
+            // Must name the project this Mac is actually signed in to (its macUid and pairing
+            // listener live there), not a region chosen since launch.
+            jsonDict["server"] = FirebaseManager.shared.configuredRegion
             jsonDict["syncMode"] = syncMode
+            guard let macUid else { return }
+            jsonDict["macUid"] = macUid
         }
 
         var plainTextData: Data?
@@ -74,7 +105,7 @@ class QRCodeGenerator: ObservableObject {
             // Fallback: hand-craft minimal JSON if serialization fails
             let jsonString = syncMode == "local"
                 ? "{\"pairingId\":\"\(pairingId)\",\"macId\":\"\(macDeviceId)\",\"deviceName\":\"\(macName)\",\"secret\":\"\(secretHex)\"}"
-                : "{\"pairingId\":\"\(pairingId)\",\"macId\":\"\(macDeviceId)\",\"deviceName\":\"\(macName)\",\"server\":\"\(currentRegion)\",\"secret\":\"\(secretHex)\",\"syncMode\":\"\(syncMode)\"}"
+                : "{\"pairingId\":\"\(pairingId)\",\"macId\":\"\(macDeviceId)\",\"deviceName\":\"\(macName)\",\"server\":\"\(FirebaseManager.shared.configuredRegion)\",\"secret\":\"\(secretHex)\",\"syncMode\":\"\(syncMode)\",\"macUid\":\"\(macUid ?? "")\"}"
             plainTextData = jsonString.data(using: .utf8)
         }
 

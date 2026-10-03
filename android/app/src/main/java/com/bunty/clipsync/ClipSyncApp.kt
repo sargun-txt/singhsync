@@ -2,8 +2,6 @@ package com.bunty.clipsync
 
 import android.app.Application
 import android.util.Log
-import com.google.firebase.FirebaseApp
-import com.google.firebase.auth.FirebaseAuth
 
 /**
  * ClipSyncApp is the custom [Application] subclass that serves as the process-wide entry
@@ -13,11 +11,10 @@ import com.google.firebase.auth.FirebaseAuth
  *
  * This class performs three startup tasks:
  *
- * 1. **Secondary Firebase initialisation** — ClipSync maintains two independent Firebase
- *    projects to minimise Firestore latency: one in India and one in the US. The India
- *    project is wired up automatically via `google-services.json`, but the US project
- *    must be registered manually as a named app (`"ClipSyncUS"`) using [FirebaseApp.initializeApp]
- *    before any component attempts a Firestore read or write.
+ * 1. **Hybrid-only Firebase initialization** — FirebaseInitProvider is removed from the
+ *    manifest. The India/default app is configured manually from google-services.json and
+ *    retains FCM/Crashlytics. US Auth/Firestore retain the named ClipSyncUS app, initialized
+ *    only when US is selected. Local-only startup initializes neither app.
  *
  * 2. **Anonymous authentication** — Firestore security rules require every incoming request
  *    to carry a valid Firebase Auth token. Because ClipSync has no user accounts, it
@@ -52,19 +49,14 @@ class ClipSyncApp : Application() {
             }
         } catch (e: Exception) {
             Log.e("ClipSync", "Failed to read sync mode on startup (likely Keystore crash)", e)
-            // Fall back to default behavior (continue with Firebase init)
+            // If mode storage is unavailable, fail closed rather than initialize cloud services.
+            return
         }
 
         try {
-            // Build FirebaseOptions for the US project. The India project is already handled
-            // automatically by the Firebase SDK reading google-services.json, so only the
-            // US secondary project needs an explicit call to FirebaseApp.initializeApp.
-            val usOptions = RegionConfig.getOptionsForRegion(this, RegionConfig.REGION_US)
-            if (usOptions != null) {
-                // Register the US project under the well-known alias "ClipSyncUS" so any
-                // component can retrieve it later via FirebaseApp.getInstance("ClipSyncUS").
-                FirebaseApp.initializeApp(this, usOptions, "ClipSyncUS")
-            }
+            // FirebaseInitProvider is removed from the merged manifest. Manual initialization
+            // keeps the default project's options unchanged; US is still a named regional app.
+            CloudAuth.app(this)
 
             // Acquire a Firebase Auth token silently so Firestore security rules are met
             // from the very first database operation attempted anywhere in the app.
@@ -118,12 +110,9 @@ class ClipSyncApp : Application() {
      * will be rejected by security rules; the app continues running and can retry later.
      */
     private fun signInAnonymously() {
-        val auth = FirebaseAuth.getInstance()
-        if (auth.currentUser == null) {
-            auth.signInAnonymously()
-                .addOnFailureListener {
-                    Log.e("ClipSync", "Anonymous Auth Failed", it)
-                }
-        }
+        // Sign in on the region-specific app that Firestore uses (the US region has its own
+        // app and Auth instance). Cloud operations themselves wait for, and require, this
+        // identity; a failure here only means they are skipped until sign-in succeeds.
+        CloudAuth.withUid(this, onFailure = { Log.e("ClipSync", "Anonymous Auth Failed") }) { }
     }
 }

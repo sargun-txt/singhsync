@@ -15,6 +15,11 @@
 import Foundation
 import CoreBluetooth
 import Combine
+import CryptoKit
+import UserNotifications
+
+// Control messages use BLE protocol v2 (BleControlProtocol.swift): every message in both
+// directions is an HMAC-authenticated envelope, verified before any field is trusted.
 
 class WakeupReceiver: NSObject, ObservableObject, CBPeripheralManagerDelegate {
 
@@ -49,20 +54,64 @@ class WakeupReceiver: NSObject, ObservableObject, CBPeripheralManagerDelegate {
     private var subscribedCentrals: [CBCentral] = []
     private var hasAddedService = false
 
+    /// Authenticates, replay-checks and correlates every inbound control message.
+    private let inbound = MacBleInbound()
+    /// Device-info envelope served for the current (possibly multi-part) read.
+    private var cachedDeviceInfo: Data?
+
+    /// The pairing key, root of the BLE auth key. Nil before the first QR code is generated.
+    private func pairingRootKey() -> SymmetricKey? {
+        guard let hex = KeychainHelper.getEncryptionKey(), hex.count == 64 else { return nil }
+        var data = Data(capacity: 32)
+        var idx = hex.startIndex
+        while idx < hex.endIndex {
+            let next = hex.index(idx, offsetBy: 2)
+            guard let byte = UInt8(hex[idx..<next], radix: 16) else { return nil }
+            data.append(byte)
+            idx = next
+        }
+        return SymmetricKey(data: data)
+    }
+
+    private static func nowMs() -> Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
+
+    private static var legacyPeerNotified = false
+
+    /// One notification per launch when an old (pre-v2, unauthenticated) phone is detected.
+    static func notifyLegacyPeerOnce() {
+        DispatchQueue.main.async {
+            guard !legacyPeerNotified else { return }
+            legacyPeerNotified = true
+            let content = UNMutableNotificationContent()
+            content.title = "Update ClipSync on your phone"
+            content.body = "This version of ClipSync can't sync securely with the older app on your Android phone."
+            UNUserNotificationCenter.current().add(
+                UNNotificationRequest(identifier: "clipsync.legacy-peer", content: content, trigger: nil))
+        }
+    }
+
     /// Returns Android's IP if it was seen within the last 2 minutes, otherwise nil.
     func getFreshAndroidIp() -> String? {
         guard let ip = lastAndroidIp, let date = lastAndroidIpDate else { return nil }
         return Date().timeIntervalSince(date) < 120 ? ip : nil
     }
 
-    /// Dynamically builds the JSON payload served when Android reads the DeviceName characteristic.
-    /// Format: {"name": "Bunty's MacBook", "ip": "192.168.x.x"}
-    private func buildDeviceInfoJSON() -> Data {
-        let name = Host.current().localizedName ?? "Mac"
-        let ip = getLocalWifiIp() ?? ""
-        let port = ClipSyncServer.shared.dynamicPort
-        let json = "{\"name\":\"\(name)\",\"ip\":\"\(ip)\",\"port\":\(port)}"
-        return json.data(using: .utf8) ?? Data()
+    /// Builds the authenticated device-info envelope served when Android reads the DeviceName
+    /// characteristic (name, LAN IP, TCP port). Before a pairing key exists it carries an
+    /// all-zero MAC: the name can be shown in the pre-pairing picker but never verifies.
+    private func buildDeviceInfoEnvelope() -> Data {
+        let name = String((Host.current().localizedName ?? "Mac").prefix(60))
+        var fields: [BleField: Data] = [
+            .name: BleControlProtocol.utf8(name),
+            .port: BleControlProtocol.u16(ClipSyncServer.shared.dynamicPort)
+        ]
+        if let ip = getLocalWifiIp(), BleControlProtocol.isValidIPv4OrEmpty(ip) {
+            fields[.ip] = BleControlProtocol.utf8(ip)
+        }
+        let authKey = pairingRootKey().map { BleControlProtocol.authKey(rootKey: $0) }
+        return (try? BleControlProtocol.encode(type: .deviceInfo, fields: fields,
+                                               messageId: BleControlProtocol.newMessageId(),
+                                               timestampMs: Self.nowMs(), authKey: authKey)) ?? Data()
     }
 
     /// Returns the Mac's current Wi-Fi IPv4 address, or nil if not on Wi-Fi.
@@ -202,7 +251,12 @@ class WakeupReceiver: NSObject, ObservableObject, CBPeripheralManagerDelegate {
             return
         }
 
-        let value = buildDeviceInfoJSON()
+        // A long read arrives as several requests with increasing offsets; serve every part from
+        // the same envelope so its MAC stays valid.
+        if request.offset == 0 || cachedDeviceInfo == nil {
+            cachedDeviceInfo = buildDeviceInfoEnvelope()
+        }
+        let value = cachedDeviceInfo ?? Data()
         guard request.offset <= value.count else {
             peripheral.respond(to: request, withResult: .invalidOffset)
             return
@@ -212,97 +266,94 @@ class WakeupReceiver: NSObject, ObservableObject, CBPeripheralManagerDelegate {
         peripheral.respond(to: request, withResult: .success)
     }
 
-    /// Called when Android writes to the Wakeup characteristic (pairing_ack, handshake,
-    /// or a real transfer wakeup ping).
+    /// Called when Android writes to the Wakeup characteristic. Every write must be an
+    /// authenticated v2 envelope (or the exact pre-pairing presence bytes); nothing below
+    /// changes state, posts UI events or touches the clipboard until `inbound` accepts it.
     func peripheralManager(
         _ peripheral: CBPeripheralManager,
         didReceiveWrite requests: [CBATTRequest]
     ) {
-        for req in requests {
-            if req.characteristic.uuid != wakeupCharUUID {
-                continue
-            }
-            
-            guard let data = req.value else {
-                if req.characteristic.properties.contains(.write) {
-                    peripheral.respond(to: req, withResult: .success)
-                }
-                continue
-            }
-            
-            let _ = String(data: data, encoding: .utf8) ?? "invalid utf8"
-            
-            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                if req.characteristic.properties.contains(.write) {
-                    peripheral.respond(to: req, withResult: .success)
-                }
-                continue
-            }
-            
-            if let type = json["type"] as? String, type == "pair" {
-                DispatchQueue.main.async { self.onDeviceConnected?() }
-                if req.characteristic.properties.contains(.write) {
-                    peripheral.respond(to: req, withResult: .success)
-                }
-                continue
-            }
+        // A long (prepared) write arrives as several requests; reassemble by offset.
+        let parts = requests
+            .filter { $0.characteristic.uuid == wakeupCharUUID }
+            .sorted { $0.offset < $1.offset }
+        var data = Data()
+        var contiguous = true
+        for part in parts {
+            guard part.offset == data.count, let value = part.value else { contiguous = false; break }
+            data.append(value)
+        }
+        if let first = requests.first, first.characteristic.properties.contains(.write) {
+            peripheral.respond(to: first, withResult: .success)
+        }
+        guard contiguous, !parts.isEmpty else { return }
 
-            let androidIp = json["ip"] as? String ?? ""
-            let ping = WakeupPayload(
-                ip: androidIp,
-                port: json["p"] as? Int ?? 8765,
-                payloadSize: json["s"] as? Int64 ?? 0,
-                payloadType: json["t"] as? String ?? "text",
-                directPayload: json["d"] as? String,
-                battery: json["b"] as? Int,
-                network: json["n"] as? String,
-                deviceName: json["dev"] as? String,
-                isDiagnostic: json["diagnostic"] as? Bool ?? false
-            )
-
-            if ping.isDiagnostic {
-                self.pushToAndroid(json: ["diagnostic_ack": true])
-                DispatchQueue.main.async {
-                    NotificationCenter.default.post(name: NSNotification.Name("DiagnosticPingReceived"), object: nil)
-                }
-                if req.characteristic.properties.contains(.write) {
-                    peripheral.respond(to: req, withResult: .success)
-                }
-                continue
-            }
-
-            if let devName = ping.deviceName,
-               shouldUpdatePairedDeviceName(current: PairingManager.shared.pairedDeviceName, incoming: devName) {
-                DispatchQueue.main.async {
-                    PairingManager.shared.pairedDeviceName = devName
-                    UserDefaults.standard.set(devName, forKey: "paired_device_name")
-                }
-            }
-
-            // Cache Android's IP for Mac-initiated transfers (2-min freshness window)
-            if !androidIp.isEmpty {
-                self.lastAndroidIp = androidIp
-                self.lastAndroidIpDate = Date()
-            }
-
-
+        switch inbound.process(data, rootKey: pairingRootKey(), nowMs: Self.nowMs()) {
+        case .presence:
+            // Pre-pairing "phone is here" signal: only advances the onboarding UI to the QR
+            // screen, and only while this Mac is not paired.
             DispatchQueue.main.async {
-                self.lastPing = ping
-
-                if let directData = ping.directPayload {
-                    ClipSyncServer.shared.handleDirectBLEPayload(
-                        base64Encrypted: directData,
-                        type: ping.payloadType
-                    )
-                } else {
-                    if !ClipSyncServer.shared.isListening {
-                        ClipSyncServer.shared.start()
-                    }
-                }
+                guard !PairingManager.shared.isPaired else { return }
+                self.onDeviceConnected?()
             }
+        case .rejected:
+            // Generic rejection; never log the message bytes. An old phone sends plain JSON:
+            // nothing from it is trusted, but the user is told once to update it.
+            if data.first == UInt8(ascii: "{") { Self.notifyLegacyPeerOnce() }
+            return
+        case .message(let message):
+            apply(message)
+        }
+    }
 
-            if req.characteristic.properties.contains(.write) {
-                peripheral.respond(to: req, withResult: .success)
+    /// Applies an authenticated, replay-checked (and, for responses, correlated) message.
+    private func apply(_ message: BleMessage) {
+        let ping = WakeupPayload(
+            ip: message.string(.ip) ?? "",
+            port: message.uint(.port).map(Int.init) ?? 8765,
+            payloadSize: message.int64(.size) ?? 0,
+            payloadType: message.type.payloadTypeName,
+            directPayload: message.string(.directPayload),
+            battery: message.uint(.battery).map(Int.init),
+            network: message.string(.network),
+            deviceName: message.string(.deviceName),
+            isDiagnostic: message.type == .diagnostic
+        )
+
+        if ping.isDiagnostic {
+            push(.diagnosticAck)
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: NSNotification.Name("DiagnosticPingReceived"), object: nil)
+            }
+            return
+        }
+
+        if let devName = ping.deviceName,
+           shouldUpdatePairedDeviceName(current: PairingManager.shared.pairedDeviceName, incoming: devName) {
+            DispatchQueue.main.async {
+                PairingManager.shared.pairedDeviceName = devName
+                UserDefaults.standard.set(devName, forKey: "paired_device_name")
+            }
+        }
+
+        // Cache Android's IP for Mac-initiated transfers (2-min freshness window)
+        if !ping.ip.isEmpty {
+            self.lastAndroidIp = ping.ip
+            self.lastAndroidIpDate = Date()
+        }
+
+        DispatchQueue.main.async {
+            self.lastPing = ping
+
+            if let directData = ping.directPayload {
+                ClipSyncServer.shared.handleDirectBLEPayload(
+                    base64Encrypted: directData,
+                    type: ping.payloadType
+                )
+            } else {
+                if !ClipSyncServer.shared.isListening {
+                    ClipSyncServer.shared.start()
+                }
             }
         }
     }
@@ -340,11 +391,27 @@ class WakeupReceiver: NSObject, ObservableObject, CBPeripheralManagerDelegate {
     /// Returns true if at least one Android central is subscribed to the SendRequest characteristic.
     var hasAndroidSubscriber: Bool { !subscribedCentrals.isEmpty }
 
-    /// Pushes [payload] to all subscribed Android centrals via BLE Notify.
-    /// Must be called from any thread — dispatches to the BLE queue internally.
-    /// Returns true if the update was queued successfully.
+    /// Sends an authenticated control message to the subscribed Android central(s).
+    /// Requests that expect a response (ping, file_incoming, text_incoming) are registered so
+    /// only a matching, authenticated reply is accepted. Returns false if not paired, if the
+    /// envelope exceeds `maxLength`, or if nothing is subscribed.
     @discardableResult
-    func pushToAndroid(_ payload: Data) -> Bool {
+    func push(_ type: BleMessageType, _ fields: [BleField: Data] = [:], maxLength: Int? = nil) -> Bool {
+        guard type.direction == .macToAndroid, let rootKey = pairingRootKey() else { return false }
+        let messageId = BleControlProtocol.newMessageId()
+        let nowMs = Self.nowMs()
+        guard let envelope = try? BleControlProtocol.encode(
+                type: type, fields: fields, messageId: messageId, timestampMs: nowMs,
+                authKey: BleControlProtocol.authKey(rootKey: rootKey)),
+              maxLength.map({ envelope.count <= $0 }) ?? true else { return false }
+        if type == .ping || type == .fileIncoming || type == .textIncoming {
+            inbound.requests.register(messageId, type: type, nowMs: nowMs)
+        }
+        return pushToAndroid(envelope)
+    }
+
+    /// Pushes raw bytes to all subscribed Android centrals via BLE Notify.
+    private func pushToAndroid(_ payload: Data) -> Bool {
         guard let peripheral = peripheralManager,
               let char = sendRequestCharacteristic,
               !subscribedCentrals.isEmpty else {
@@ -352,13 +419,6 @@ class WakeupReceiver: NSObject, ObservableObject, CBPeripheralManagerDelegate {
         }
         let success = peripheral.updateValue(payload, for: char, onSubscribedCentrals: nil)
         return success
-    }
-
-    /// Pushes a JSON-serialisable dictionary to Android via BLE Notify.
-    @discardableResult
-    func pushToAndroid(json: [String: Any]) -> Bool {
-        guard let data = try? JSONSerialization.data(withJSONObject: json) else { return false }
-        return pushToAndroid(data)
     }
 }
 

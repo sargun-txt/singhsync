@@ -60,7 +60,13 @@
         android:theme="@style/Theme.ClipSync"
         tools:targetApi="31">
 
-        <!-- Disable Automatic Firebase Init so we can choose Region Manually -->
+        <!-- Initialize explicitly in hybrid mode, with the default push/Crashlytics app unchanged. -->
+        <provider
+            android:name="com.google.firebase.provider.FirebaseInitProvider"
+            android:authorities="${applicationId}.firebaseinitprovider"
+            tools:node="remove" />
+        <!-- Only authenticated, paired registration code may request an FCM token. -->
+        <meta-data android:name="firebase_messaging_auto_init_enabled" android:value="false" />
 
 
         <!-- MAIN ACTIVITY -->

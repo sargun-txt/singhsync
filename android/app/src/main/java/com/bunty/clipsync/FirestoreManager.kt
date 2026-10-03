@@ -37,18 +37,18 @@ object FirestoreManager {
      * this function logs a warning and falls back to the default instance so that no
      * operation is silently lost.
      */
-    internal fun getDb(context: Context): FirebaseFirestore {
-        val targetRegion = DeviceManager.getTargetRegion(context)
-        return if (targetRegion == RegionConfig.REGION_US) {
-            try {
-                FirebaseFirestore.getInstance(com.google.firebase.FirebaseApp.getInstance("ClipSyncUS"))
-            } catch (e: Exception) {
-                Log.e("FirestoreManager", "US App not initialized, falling back to default", e)
-                FirebaseFirestore.getInstance()
-            }
-        } else {
-            // Default Firebase app targets the India Firestore region via google-services.json.
-            FirebaseFirestore.getInstance()
+    internal fun getDb(context: Context): FirebaseFirestore =
+        // Same region app as CloudAuth, so requests carry that app's signed-in identity.
+        FirebaseFirestore.getInstance(CloudAuth.app(context))
+
+    /** A legacy (pre-membership) or foreign pairing: rules deny it, so ask the user to re-pair once. */
+    @Volatile private var repairNoticeShown = false
+
+    private fun handleListenError(context: Context, error: Exception) {
+        val code = (error as? com.google.firebase.firestore.FirebaseFirestoreException)?.code
+        if (code == com.google.firebase.firestore.FirebaseFirestoreException.Code.PERMISSION_DENIED && !repairNoticeShown) {
+            repairNoticeShown = true
+            DeviceManager.notifySecurityError(context, CloudAuth.REPAIR_REQUIRED_MESSAGE)
         }
     }
 
@@ -133,6 +133,8 @@ object FirestoreManager {
                 val version       = json.optInt("version", 1)
                 val pairingId     = json.optString("pairingId")
                 val bleAuthToken  = json.optString("bleAuthToken")
+                // The Mac's Firebase UID (cloud pairing). Absent in QR codes from older Macs.
+                val macUid        = json.optString("macUid")
                 val lanService    = json.optString("lanServiceName").ifEmpty { "_clipsync._tcp" }
                 val capabilitiesJson = json.optJSONArray("capabilities")
                 val capabilities  = if (capabilitiesJson != null) {
@@ -151,6 +153,7 @@ object FirestoreManager {
                         "version"        to version,
                         "pairingId"      to pairingId,
                         "bleAuthToken"   to bleAuthToken,
+                        "macUid"         to macUid,
                         "lanServiceName" to lanService,
                         "capabilities"   to capabilities
                     )
@@ -285,69 +288,90 @@ object FirestoreManager {
         onSuccess: (String) -> Unit,
         onFailure: (Exception) -> Unit
     ) {
+        if (DeviceManager.getSyncMode(context) != "hybrid") {
+            onFailure(IllegalStateException("Cloud sync disabled"))
+            return
+        }
         val androidDeviceId   = DeviceManager.getDeviceId(context)
         val androidDeviceName = DeviceManager.getAndroidDeviceName(context)
         val macDeviceId       = qrData["macDeviceId"] as? String ?: ""
         val macDeviceName     = qrData["macDeviceName"] as? String ?: "Mac"
         val secret            = qrData["secret"] as? String
+        val macUid            = (qrData["macUid"] as? String)?.takeIf { it.isNotEmpty() }
+
+        // Cloud pairing needs both the pairing key and the Mac's Firebase UID from the QR code.
+        // An older Mac's QR has no UID: refuse rather than create a pairing the rules reject.
+        val rootKey = secret?.let {
+            try { TcpFrameProtocol.rootKey(it) } catch (e: TcpFrameProtocol.FrameException) { null }
+        }
+        if (rootKey == null) {
+            onFailure(IllegalStateException("This QR code has no valid pairing key."))
+            return
+        }
+        if (!CloudPairingAuth.isValidUid(macUid)) {
+            onFailure(IllegalStateException(CloudAuth.MAC_TOO_OLD_MESSAGE))
+            return
+        }
 
         // Persist the session encryption key before writing to Firestore so that the
         // first outgoing clipboard item is encrypted with the correct key.
-        if (!secret.isNullOrEmpty()) {
-            DeviceManager.saveEncryptionKey(context, secret)
-        }
+        DeviceManager.saveEncryptionKey(context, secret!!)
 
-        val pairingData = hashMapOf<String, Any>(
-            "androidDeviceId"   to androidDeviceId,
-            "androidDeviceName" to androidDeviceName,
-            "macDeviceId"       to macDeviceId,
-            "macId"             to macDeviceId,  // legacy alias kept for Mac-side compatibility
-            "macDeviceName"     to macDeviceName,
-            "createdAt"         to System.currentTimeMillis(),
-            "timestamp"         to com.google.firebase.Timestamp.now(),
-            "status"            to "active"
-        )
+        CloudAuth.withUid(context, onFailure = { onFailure(IllegalStateException(CloudAuth.SIGN_IN_FAILED_MESSAGE)) }) { androidUid ->
+            val ref = getDb(context).collection("pairings").document()
+            // Pending pairing with this phone as its only member, naming the Mac and carrying
+            // the proof the Mac verifies (with the pairing key) before joining.
+            val membership = CloudPairingAuth.pendingPairingFields(ref.id, androidUid, macUid, rootKey)
+            if (membership == null) {
+                onFailure(IllegalStateException(CloudAuth.MAC_TOO_OLD_MESSAGE))
+                return@withUid
+            }
+            val pairingData = HashMap<String, Any>(membership).apply {
+                put("androidDeviceId",   androidDeviceId)
+                put("androidDeviceName", androidDeviceName)
+                put("macDeviceId",       macDeviceId)
+                put("macId",             macDeviceId)  // legacy alias kept for Mac-side compatibility
+                put("macDeviceName",     macDeviceName)
+                put("createdAt",         System.currentTimeMillis())
+                put("timestamp",         com.google.firebase.firestore.FieldValue.serverTimestamp())
+            }
 
-        /** Writes [pairingData] to the `pairings` collection and invokes the result callbacks. */
-        fun createNewPairing() {
-            getDb(context).collection("pairings")
-                .add(pairingData)
-                .addOnSuccessListener { documentReference ->
-                    val pairingId = documentReference.id
-                    // Write the auto-generated document ID back into the document itself so
-                    // the Mac can retrieve the pairing ID without knowing it in advance.
-                    documentReference.update("pairingId", pairingId)
+            /** Writes the pending pairing at its pre-allocated ID and invokes the callbacks. */
+            fun createNewPairing() {
+                ref.set(pairingData)
+                    .addOnSuccessListener {
+                        DeviceManager.savePairing(
+                            context       = context,
+                            pairingId     = ref.id,
+                            macDeviceId   = macDeviceId,
+                            macDeviceName = macDeviceName
+                        )
+                        repairNoticeShown = false
+                        onSuccess(ref.id)
+                    }
+                    .addOnFailureListener { exception ->
+                        Log.e("FirestoreManager", "Failed to create pairing", exception)
+                        onFailure(exception)
+                    }
+            }
 
-                    DeviceManager.savePairing(
-                        context       = context,
-                        pairingId     = pairingId,
-                        macDeviceId   = macDeviceId,
-                        macDeviceName = macDeviceName
-                    )
-
-                    onSuccess(pairingId)
-                }
-                .addOnFailureListener { exception ->
-                    Log.e("FirestoreManager", "Failed to create pairing", exception)
-                    onFailure(exception)
-                }
-        }
-
-        // Delete the stale pairing document first; new document creation proceeds
-        // regardless of whether the deletion succeeds, to avoid blocking the user.
-        val oldPairingId = DeviceManager.getPairingId(context)
-        if (oldPairingId != null) {
-            getDb(context).collection("pairings").document(oldPairingId).delete()
-                .addOnSuccessListener  { createNewPairing() }
-                .addOnFailureListener  { createNewPairing() } // always attempt creation
-        } else {
-            createNewPairing()
+            // Delete the stale pairing document first (allowed only if we are a member);
+            // creation proceeds regardless of whether the deletion succeeds.
+            val oldPairingId = DeviceManager.getPairingId(context)
+            if (oldPairingId != null) {
+                getDb(context).collection("pairings").document(oldPairingId).delete()
+                    .addOnSuccessListener  { createNewPairing() }
+                    .addOnFailureListener  { createNewPairing() } // always attempt creation
+            } else {
+                createNewPairing()
+            }
         }
     }
 
     fun updateStatusToActive(context: Context) {
+        if (DeviceManager.getSyncMode(context) != "hybrid") return
         val pairingId = DeviceManager.getPairingId(context)
-        if (pairingId != null) {
+        if (pairingId != null && CloudAuth.currentUid(context) != null) {
             getDb(context).collection("pairings").document(pairingId)
                 .update("status", "active")
         }
@@ -374,16 +398,22 @@ object FirestoreManager {
         context: Context,
         onClipboardUpdate: (String) -> Unit
     ): ListenerRegistration? {
+        // Local-only mode never contacts the cloud (no listener, no Firebase sign-in).
+        if (DeviceManager.getSyncMode(context) != "hybrid") return null
         val pairingId       = DeviceManager.getPairingId(context) ?: return null
         val currentDeviceId = DeviceManager.getDeviceId(context)
 
-        return getDb(context).collection("clipboardItems")
+        // The listener attaches only once this device has a Firebase identity (fail closed).
+        val registration = CloudAuth.DeferredRegistration()
+        CloudAuth.withUid(context, onFailure = { Log.e("FirestoreManager", "Not signed in; clipboard listener not started") }) {
+          registration.attach(getDb(context).collection("clipboardItems")
             .whereEqualTo("pairingId", pairingId)
             .orderBy("timestamp", com.google.firebase.firestore.Query.Direction.DESCENDING)
             .limit(1)
             .addSnapshotListener { snapshots, error ->
                 if (error != null) {
                     Log.e("FirestoreManager", "Listen failed", error)
+                    handleListenError(context, error)
                     return@addSnapshotListener
                 }
 
@@ -405,7 +435,9 @@ object FirestoreManager {
                         }
                     }
                 }
-            }
+            })
+        }
+        return registration
     }
 
     /**
@@ -416,8 +448,10 @@ object FirestoreManager {
         context: Context,
         onClipboardUpdate: (String) -> Unit
     ) {
+        if (DeviceManager.getSyncMode(context) != "hybrid") return
         val pairingId       = DeviceManager.getPairingId(context) ?: return
         val currentDeviceId = DeviceManager.getDeviceId(context)
+        if (CloudAuth.currentUid(context) == null) return // fail closed: no identity, no read
 
         getDb(context).collection("clipboardItems")
             .whereEqualTo("pairingId", pairingId)
@@ -443,6 +477,7 @@ object FirestoreManager {
             }
             .addOnFailureListener { error ->
                 Log.e("FirestoreManager", "fetchLatestClipboard failed", error)
+                handleListenError(context, error)
             }
     }
 
@@ -453,6 +488,8 @@ object FirestoreManager {
         context: Context,
         onFileReceived: (fileName: String, fileBytes: ByteArray) -> Unit
     ): ListenerRegistration? {
+        if (DeviceManager.getSyncMode(context) != "hybrid") return null
+        if (CloudAuth.currentUid(context) == null) return null
         val pairingId = DeviceManager.getPairingId(context) ?: return null
 
         return getDb(context).collection("fileTransfers")
@@ -499,6 +536,10 @@ object FirestoreManager {
         onSuccess: () -> Unit = {},
         onFailure: (Exception) -> Unit = {}
     ) {
+        if (DeviceManager.getSyncMode(context) != "hybrid") {
+            onFailure(IllegalStateException("Cloud sync disabled"))
+            return
+        }
         val pairingId = DeviceManager.getPairingId(context)
         if (pairingId == null) {
             onFailure(Exception("No pairing ID found"))
@@ -514,19 +555,24 @@ object FirestoreManager {
             return
         }
 
-        val clipboardData = hashMapOf<String, Any>(
-            "content"        to encryptedContent,
-            "pairingId"      to pairingId,
-            "sourceDeviceId" to DeviceManager.getDeviceId(context),
-            "timestamp"      to com.google.firebase.firestore.FieldValue.serverTimestamp(),
-            "type"           to "text"
-        )
+        // Requires an authenticated identity; the rules also require it to be a pairing member.
+        val uid = CloudAuth.currentUid(context)
+        val fields = CloudPairingAuth.clipboardItemFields(uid, pairingId, encryptedContent, DeviceManager.getDeviceId(context))
+        if (fields == null) {
+            if (uid == null) CloudAuth.withUid(context, onReady = {}, onFailure = {}) // sign in for next time
+            onFailure(IllegalStateException("Not signed in to cloud sync — clipboard not sent"))
+            return
+        }
+        val clipboardData = HashMap<String, Any>(fields).apply {
+            put("timestamp", com.google.firebase.firestore.FieldValue.serverTimestamp())
+        }
 
         getDb(context).collection("clipboardItems")
             .add(clipboardData)
             .addOnSuccessListener { onSuccess() }
             .addOnFailureListener { exception ->
                 Log.e("FirestoreManager", "Failed to send clipboard", exception)
+                handleListenError(context, exception)
                 onFailure(exception)
             }
     }
@@ -548,7 +594,18 @@ object FirestoreManager {
         onSuccess: () -> Unit = {},
         onFailure: (Exception) -> Unit = {}
     ) {
-        val pairingId = DeviceManager.getPairingId(context) ?: return
+        if (DeviceManager.getSyncMode(context) != "hybrid") {
+            DeviceManager.clearPairing(context)
+            onSuccess()
+            return
+        }
+        val pairingId = DeviceManager.getPairingId(context) ?: run { onSuccess(); return }
+        if (CloudAuth.currentUid(context) == null) {
+            // Reset remains possible after an identity loss; cloud cleanup cannot be authorized.
+            DeviceManager.clearPairing(context)
+            onSuccess()
+            return
+        }
 
         getDb(context).collection("pairings")
             .document(pairingId)
@@ -559,7 +616,10 @@ object FirestoreManager {
             }
             .addOnFailureListener { exception ->
                 Log.e("FirestoreManager", "Failed to clear pairing", exception)
-                onFailure(exception)
+                // A legacy pairing or changed UID cannot delete the old membership document.
+                // Always allow the user's explicit reset to clear local state and scan again.
+                DeviceManager.clearPairing(context)
+                onSuccess()
             }
     }
 
@@ -583,9 +643,17 @@ object FirestoreManager {
         onSuccess: () -> Unit = {},
         onFailure: (Exception) -> Unit = {}
     ) {
+        if (DeviceManager.getSyncMode(context) != "hybrid") {
+            onFailure(IllegalStateException("Cloud sync disabled"))
+            return
+        }
         val pairingId = DeviceManager.getPairingId(context)
         if (pairingId == null) {
             onFailure(Exception("No pairing ID found"))
+            return
+        }
+        if (CloudAuth.currentUid(context) == null) {
+            onFailure(IllegalStateException(CloudAuth.SIGN_IN_FAILED_MESSAGE))
             return
         }
 

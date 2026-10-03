@@ -58,7 +58,7 @@ object DeviceManager {
     private const val KEY_MAC_LOCAL_IP       = "mac_local_ip"
     /** Last known LAN port of the paired Mac TCP server. */
     private const val KEY_MAC_LOCAL_PORT     = "mac_local_port"
-    /** Toggle for Ultra Fast (Unencrypted Zero-Copy) Mode */
+    /** Toggle for Ultra Fast mode: larger encrypted chunks for file transfers (never unencrypted). */
     private const val KEY_ULTRA_FAST_MODE    = "ultra_fast_mode"
     /** Default directory URI string for saving received files. */
     private const val KEY_DEFAULT_SAVE_DIR   = "default_save_dir"
@@ -130,10 +130,14 @@ object DeviceManager {
      * @param region The region code to persist — typically `"IN"` or `"US"`.
      */
     fun setTargetRegion(context: Context, region: String) {
-        val normalizedRegion = region.uppercase()
-        // Skip the write entirely when the value hasn't changed to avoid unnecessary disk I/O.
-        if (normalizedRegion != getTargetRegion(context)) {
-            getPrefs(context).edit().putString(KEY_REGION, normalizedRegion).commit()
+        synchronized(FCMTokenManager.stateLock) {
+            val normalizedRegion = region.uppercase()
+            // Skip the write entirely when the value hasn't changed to avoid unnecessary disk I/O.
+            if (normalizedRegion != getTargetRegion(context)) {
+                FCMTokenManager.deleteStoredRegistration(context)
+                getPrefs(context).edit().putString(KEY_REGION, normalizedRegion).commit()
+            }
+
         }
     }
 
@@ -409,13 +413,17 @@ object DeviceManager {
      * should also be removed.
      */
     fun clearPairing(context: Context) {
-        getPrefs(context).edit().apply {
-            putBoolean(KEY_PAIRED,           false)
-            remove(KEY_PAIRING_ID)
-            remove(KEY_PAIRED_DEVICE_ID)
-            remove(KEY_PAIRED_DEVICE_NAME)
-            remove(KEY_ENCRYPTION_KEY)
-            apply()
+        synchronized(FCMTokenManager.stateLock) {
+            FCMTokenManager.deleteStoredRegistration(context)
+            getPrefs(context).edit().apply {
+                putBoolean(KEY_PAIRED,           false)
+                remove(KEY_PAIRING_ID)
+                remove(KEY_PAIRED_DEVICE_ID)
+                remove(KEY_PAIRED_DEVICE_NAME)
+                remove(KEY_ENCRYPTION_KEY)
+                apply()
+            }
+
         }
     }
 
@@ -443,14 +451,24 @@ object DeviceManager {
         getPrefs(context).edit().putString(KEY_ENCRYPTION_KEY, key).apply()
     }
 
-    /** Persists the selected sync mode in encrypted app storage. */
-    fun setSyncMode(context: Context, mode: String) {
-        val normalized = when (mode.lowercase()) {
-            "local", "local_only", "local-only" -> "local"
-            else -> "hybrid"
+    /** Returns true when the UI must close this cloud-initialized process before local pairing. */
+    fun setSyncMode(context: Context, mode: String): Boolean =
+        synchronized(FCMTokenManager.stateLock) {
+            val normalized = when (mode.lowercase()) {
+                "local", "local_only", "local-only" -> "local"
+                else -> "hybrid"
+            }
+            val previousMode = getSyncMode(context)
+            val restart = FcmTokenPolicy.requiresLocalRestart(previousMode, normalized,
+                com.google.firebase.FirebaseApp.getApps(context).isNotEmpty())
+            if (normalized == "local" && previousMode == "hybrid") {
+                FCMTokenManager.deleteStoredRegistration(context)
+            }
+            check(getPrefs(context).edit().putString(KEY_SYNC_MODE, normalized).commit()) {
+                "Could not persist sync mode"
+            }
+            restart
         }
-        getPrefs(context).edit().putString(KEY_SYNC_MODE, normalized).apply()
-    }
 
     /** Returns the selected sync mode. Defaults to hybrid until the user chooses. */
     fun getSyncMode(context: Context): String =

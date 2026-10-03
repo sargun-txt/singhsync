@@ -140,19 +140,20 @@ object BLEScanner {
                             g.disconnect(); g.close()
                         }
                     }
-                    private fun handleRes(g: BluetoothGatt, value: String?) {
+                    private fun handleRes(g: BluetoothGatt, value: ByteArray?) {
                         timeoutHandler.removeCallbacks(timeoutRunnable)
                         g.disconnect(); g.close()
-                        val name = try { org.json.JSONObject(value ?: "").optString("name", "ClipSync Mac") } catch (e: Exception) { value }
+                        // Pre-pairing device picker: display-only, never trusted.
+                        val name = value?.let { BleControlProtocol.unverifiedDisplayName(it) } ?: "ClipSync Mac"
                         android.os.Handler(android.os.Looper.getMainLooper()).post { onResult(name) }
                     }
                     @Deprecated("Deprecated in Java")
                     override fun onCharacteristicRead(g: BluetoothGatt, c: BluetoothGattCharacteristic, status: Int) {
                         @Suppress("DEPRECATION")
-                        handleRes(g, if (status == BluetoothGatt.GATT_SUCCESS) c.value?.toString(Charsets.UTF_8) else null)
+                        handleRes(g, if (status == BluetoothGatt.GATT_SUCCESS) c.value else null)
                     }
                     override fun onCharacteristicRead(g: BluetoothGatt, c: BluetoothGattCharacteristic, v: ByteArray, status: Int) {
-                        handleRes(g, if (status == BluetoothGatt.GATT_SUCCESS) v.toString(Charsets.UTF_8) else null)
+                        handleRes(g, if (status == BluetoothGatt.GATT_SUCCESS) v else null)
                     }
                 }
                 

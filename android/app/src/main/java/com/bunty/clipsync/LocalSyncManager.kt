@@ -302,11 +302,11 @@ object LocalSyncManager {
             }
             val encryptedPayloadBytes = AesGcmCipher.encrypt(payloadBytes, hexKey)
             val base64Payload = android.util.Base64.encodeToString(encryptedPayloadBytes, android.util.Base64.NO_WRAP)
-            
+
             val info = (context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? android.net.wifi.WifiManager)?.connectionInfo
             val rawSsid = info?.ssid?.removeSurrounding("\"")
             val ssid = if (rawSsid.isNullOrBlank()) null else if (rawSsid == "<unknown ssid>") (if (info.networkId != -1) "Wi-Fi Connected" else null) else rawSsid
-            
+
             val deferred = kotlinx.coroutines.CompletableDeferred<Boolean>()
             val ping = WakeupPing(
                 localIp = "",
@@ -324,7 +324,7 @@ object LocalSyncManager {
                 onSent = { _, _ -> deferred.complete(true) },
                 onFailed = { deferred.complete(false) }
             )
-            
+
             val bleSuccess = deferred.await()
             if (bleSuccess) {
                 _state.value = SyncState.Success
@@ -409,40 +409,28 @@ object LocalSyncManager {
             when {
                 sharedFile != null -> {
                     setState(SyncState.Streaming(0f), "file transfer started")
-                    
-                    val uftEnabled = DeviceManager.isUltraFastModeEnabled(context)
-                    if (uftEnabled && sharedFile.pfd != null) {
-                        // ULTRA FAST MODE — Zero copy, no encryption, bypasses JVM
-                        ClipSyncSender.sendZeroCopyFileStream(
-                            ip = macIp,
-                            port = macPort,
-                            fileName = sharedFile.fileName,
-                            fileSize = sharedFile.fileSize,
-                            fd = sharedFile.pfd.fileDescriptor,
-                            onProgress = { p, s -> 
-                                setState(SyncState.Streaming(p, s), "zero copy progress")
-                                if (payloadSize > 1_000_000) showSendProgressNotification(context, sharedFile.fileName, (p * 100).toInt(), payloadSize)
-                            }
-                        )
-                    } else {
-                        // STANDARD MODE — Encrypted stream
-                        ClipSyncSender.sendFileStream(
-                            ip = macIp,
-                            port = macPort,
-                            fileName = sharedFile.fileName,
-                            fileSize = sharedFile.fileSize,
-                            inputStreamProvider = { 
-                                if (sharedFile.pfd != null) java.io.FileInputStream(sharedFile.pfd.fileDescriptor)
-                                else context.contentResolver.openInputStream(sharedFile.uri!!) ?: throw Exception("Failed to open stream")
-                            },
-                            hexKey = hexKey,
-                            onProgress = { p, s -> 
-                                setState(SyncState.Streaming(p, s), "file transfer progress")
-                                if (payloadSize > 1_000_000) showSendProgressNotification(context, sharedFile.fileName, (p * 100).toInt(), payloadSize)
-                            }
-                        )
-                    }
-                    
+
+                    // Ultra Fast only selects larger encrypted chunks; it never disables encryption.
+                    val profile = ClipSyncSender.TransferProfile.forUltraFast(
+                        DeviceManager.isUltraFastModeEnabled(context)
+                    )
+                    ClipSyncSender.sendFileStream(
+                        ip = macIp,
+                        port = macPort,
+                        fileName = sharedFile.fileName,
+                        fileSize = sharedFile.fileSize,
+                        inputStreamProvider = {
+                            if (sharedFile.pfd != null) java.io.FileInputStream(sharedFile.pfd.fileDescriptor)
+                            else context.contentResolver.openInputStream(sharedFile.uri!!) ?: throw Exception("Failed to open stream")
+                        },
+                        hexKey = hexKey,
+                        profile = profile,
+                        onProgress = { p, s ->
+                            setState(SyncState.Streaming(p, s), "file transfer progress")
+                            if (payloadSize > 1_000_000) showSendProgressNotification(context, sharedFile.fileName, (p * 100).toInt(), payloadSize)
+                        }
+                    )
+
                     // Cleanup PFD after transfer (whether successful or not)
                     try { sharedFile.pfd?.close() } catch (e: Exception) {}
                 }
@@ -465,7 +453,7 @@ object LocalSyncManager {
                         fileSize = payloadSize,
                         inputStreamProvider = { context.contentResolver.openInputStream(uri) ?: throw Exception("Failed to open stream") },
                         hexKey = hexKey,
-                        onProgress = { p, s -> 
+                        onProgress = { p, s ->
                             setState(SyncState.Streaming(p, s), "file transfer progress")
                             if (payloadSize > 1_000_000) showSendProgressNotification(context, fileName, (p * 100).toInt(), payloadSize)
                         }
@@ -478,7 +466,7 @@ object LocalSyncManager {
                         port       = macPort,
                         file       = file,
                         hexKey     = hexKey,
-                        onProgress = { p, s -> 
+                        onProgress = { p, s ->
                             setState(SyncState.Streaming(p, s), "image transfer progress")
                             if (payloadSize > 1_000_000) showSendProgressNotification(context, "Image", (p * 100).toInt(), payloadSize)
                         }
@@ -487,25 +475,24 @@ object LocalSyncManager {
                 file != null -> {
                     if (DeviceManager.isUltraFastModeEnabled(context)) {
                         setState(SyncState.Streaming(0f), "ultra fast transfer started")
-                        
+
                         val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
                         val wifiLock = wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "clipsync_uft_transfer_lock")
-                        
+
                         try {
                             wifiLock.acquire()
-                            java.io.FileInputStream(file).use { fis ->
-                                ClipSyncSender.sendZeroCopyFileStream(
-                                    ip         = macIp,
-                                    port       = macPort,
-                                    fileName   = file.name,
-                                    fileSize   = payloadSize,
-                                    fd         = fis.fd,
-                                    onProgress = { p, s -> 
-                                        setState(SyncState.Streaming(p, s), "ultra fast transfer progress")
-                                        if (payloadSize > 1_000_000) showSendProgressNotification(context, "File", (p * 100).toInt(), payloadSize)
-                                    }
-                                )
-                            }
+                            // Same encrypted frame as normal mode, with larger chunks and buffers.
+                            ClipSyncSender.sendFile(
+                                ip         = macIp,
+                                port       = macPort,
+                                file       = file,
+                                hexKey     = hexKey,
+                                profile    = ClipSyncSender.TransferProfile.ULTRA_FAST,
+                                onProgress = { p, s ->
+                                    setState(SyncState.Streaming(p, s), "ultra fast transfer progress")
+                                    if (payloadSize > 1_000_000) showSendProgressNotification(context, "File", (p * 100).toInt(), payloadSize)
+                                }
+                            )
                         } finally {
                             if (wifiLock.isHeld) {
                                 wifiLock.release()
@@ -519,7 +506,7 @@ object LocalSyncManager {
                             port       = macPort,
                             file       = file,
                             hexKey     = hexKey,
-                            onProgress = { p, s -> 
+                            onProgress = { p, s ->
                                 setState(SyncState.Streaming(p, s), "file transfer progress")
                                 if (payloadSize > 1_000_000) showSendProgressNotification(context, "File", (p * 100).toInt(), payloadSize)
                             }
@@ -635,7 +622,7 @@ object LocalSyncManager {
     private fun sendBleWakeup(context: Context, macIp: String, payloadSize: Long, type: String) {
         setState(SyncState.SendingWakeup, "BLE wakeup requested: type=$type macIp=$macIp payload=$payloadSize")
         val androidIp = getLocalIpAddress(context) ?: macIp   // fallback: Mac already knows its own IP
-        
+
         val bm = context.getSystemService(Context.BATTERY_SERVICE) as android.os.BatteryManager
         val battery = bm.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY)
         val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? android.net.wifi.WifiManager
