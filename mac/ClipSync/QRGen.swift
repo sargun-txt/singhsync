@@ -83,7 +83,7 @@ struct QRGenScreen: View {
                         HStack(alignment: .center, spacing: 14) {
                             NumberCircleView(number: "1")
 
-                            Text("Open ClipSync app on your\nAndroid Phone")
+                            Text("Open Crossiva app on your\nAndroid Phone")
                                 .font(.custom("SF Pro", size: 19))
                                 .fontWeight(.medium)
                                 .lineSpacing(2)
@@ -259,8 +259,8 @@ struct QRGenScreen: View {
                                 .fill(Color.green)
                                 .frame(width: 6, height: 6)
 
-                            let region = UserDefaults.standard.string(forKey: "server_region") ?? "IN"
-                            Text("Connected to \(region == "US" ? "🇺🇸 US" : "🇮🇳 India") server")
+                            let region = UserDefaults.standard.string(forKey: "server_region") ?? "CA"
+                            Text("Connected to \(region == "CA" ? "🇨🇦 Canada" : (region == "US" ? "🇺🇸 US" : "🇮🇳 India")) server")
                                 .font(.custom("SF Pro", size: 11))
                                 .foregroundColor(.white.opacity(0.8))
                         }
@@ -508,7 +508,7 @@ struct QRGenScreen: View {
     // Notes: Keep logic cohesive and avoid hidden side effects outside this scope.
     private func updateServerRegion(for country: String, userInitiated: Bool = false) {
         let newRegion = RegionConfig.getOptimalServer(for: country)
-        let currentRegion = UserDefaults.standard.string(forKey: "server_region") ?? "IN"
+        let currentRegion = UserDefaults.standard.string(forKey: "server_region") ?? "CA"
 
         UserDefaults.standard.set(country, forKey: "selected_country_name")
 
@@ -681,7 +681,7 @@ struct CountryPickerView: View {
 
 
                                 let server = RegionConfig.getOptimalServer(for: country)
-                                Text(server == "US" ? "🇺🇸" : "🇮🇳")
+                                Text(server == "CA" ? "🇨🇦" : (server == "US" ? "🇺🇸" : "🇮🇳"))
                                     .font(.system(size: 14))
                             }
                             .padding(.horizontal, 16)

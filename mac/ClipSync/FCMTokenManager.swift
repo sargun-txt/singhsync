@@ -33,12 +33,15 @@ class FCMTokenManager {
         let deviceName = DeviceManager.shared.getFriendlyMacName()
 
         // Get projectId from active Firebase configuration
-        let projectId = FirebaseApp.app()?.options.projectID ?? "clipsyncind"
+        guard let projectId = FirebaseApp.app()?.options.projectID,
+              projectId == "crossiva-dev-ca",
+              let authProjectId = FirebaseManager.shared.app.options.projectID else { return }
         
         let tokenData: [String: Any] = [
             "token": token,
             "platform": "mac",
             "projectId": projectId,
+            "authProjectId": authProjectId,
             "deviceId": deviceId,
             "deviceName": deviceName,
             "appVersion": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0",

@@ -28,14 +28,14 @@ func check(_ condition: Bool, _ message: String, line: Int = #line) {
 
 func makeTempDir() -> URL {
     let dir = FileManager.default.temporaryDirectory
-        .appendingPathComponent("clipsync-policy-tests-\(UUID().uuidString)", isDirectory: true)
+        .appendingPathComponent("crossiva-policy-tests-\(UUID().uuidString)", isDirectory: true)
     try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     return dir
 }
 
 /// Mirrors ClipSyncServer.beginPayload: sanitize, fall back, create uniquely.
 func destination(for raw: String?, in dir: URL) throws -> URL {
-    let name = TransferSecurityPolicy.sanitizedFileName(raw) ?? "ClipSync_fallback"
+    let name = TransferSecurityPolicy.sanitizedFileName(raw) ?? "Crossiva_fallback"
     let created = try TransferSecurityPolicy.createUniqueFile(in: dir, preferredName: name)
     created.handle.closeFile()
     return created.url
@@ -211,6 +211,13 @@ do {
 runTcpProtocolTests()
 runBleProtocolTests()
 runCloudPairingAuthTests()
+check(FirebaseRegion.forCountry("Canada") == "CA", "Canada selects CA")
+check(FirebaseRegion.forCountry("United States") == "US", "United States selects US")
+check(FirebaseRegion.forCountry("India") == "IN", "India selects IN")
+check(FirebaseRegion.projectID(for: "CA") == "crossiva-dev-ca", "CA project")
+check(FirebaseRegion.projectID(for: "US") == "crossiva-dev-us", "US project")
+check(FirebaseRegion.projectID(for: "IN") == "crossiva-dev-in", "IN project")
+check(FirebaseRegion.projectID(for: "unknown") == nil, "unknown region fails closed")
 runUpdatePolicyTests()
 
 print("\(checks - failures)/\(checks) checks passed")

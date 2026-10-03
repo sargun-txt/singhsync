@@ -9,7 +9,7 @@ import Foundation
 ///   ClipSyncServer.shared.sendFiles(urls: urls)
 enum SecurityScopedResourceManager {
 
-    private static let appGroupID  = "group.com.OP.ClipSync"
+    private static let appGroupID  = "group.com.singheverything.crossiva"
     private static let defaultsKey = "pendingBookmarks"
 
     /// Reads all pending bookmark Data values from shared UserDefaults,

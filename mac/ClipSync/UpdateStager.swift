@@ -29,7 +29,7 @@ nonisolated struct UpdateStager {
             try? FileManager.default.removeItem(at: downloadedArchive)
             return .failure(.noTrustAnchor)
         }
-        let staging = stagingRoot.appendingPathComponent("ClipSyncUpdate-\(UUID().uuidString)", isDirectory: true)
+        let staging = stagingRoot.appendingPathComponent("CrossivaUpdate-\(UUID().uuidString)", isDirectory: true)
         let result = stage(archive: downloadedArchive, in: staging, team: team,
                            expectedBundleId: expectedBundleId, currentVersion: currentVersion)
         if case .failure = result {
@@ -100,7 +100,7 @@ nonisolated struct UpdateStager {
         defer { try? fm.removeItem(at: staged.stagingDirectory) }
         let safeVersion = staged.version.filter { $0.isLetter || $0.isNumber || $0 == "." || $0 == "-" }
         for attempt in 0..<100 {
-            let name = attempt == 0 ? "ClipSync \(safeVersion).app" : "ClipSync \(safeVersion) (\(attempt)).app"
+            let name = attempt == 0 ? "Crossiva \(safeVersion).app" : "Crossiva \(safeVersion) (\(attempt)).app"
             let dest = directory.appendingPathComponent(name, isDirectory: true)
             if fm.fileExists(atPath: dest.path) { continue }
             if (try? fm.moveItem(at: staged.appURL, to: dest)) != nil { return dest }

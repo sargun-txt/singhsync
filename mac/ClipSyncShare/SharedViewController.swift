@@ -15,9 +15,9 @@ import Cocoa
 /// zero disk overhead and no memory-limit crashes on large files.
 class ShareViewController: NSViewController {
 
-    private let appGroupID  = "group.com.OP.ClipSync"
+    private let appGroupID  = "group.com.singheverything.crossiva"
     private let defaultsKey = "pendingBookmarks"
-    private let mainAppBundleID = "com.OP.ClipSync"
+    private let mainAppBundleID = "com.singheverything.crossiva"
 
     override func loadView() {
         self.view = NSView()
@@ -94,7 +94,7 @@ class ShareViewController: NSViewController {
         let center = CFNotificationCenterGetDarwinNotifyCenter()
         CFNotificationCenterPostNotification(
             center,
-            CFNotificationName("com.OP.ClipSync.share.pendingFiles" as CFString),
+            CFNotificationName("com.singheverything.crossiva.share.pendingFiles" as CFString),
             nil, nil, true
         )
     }
@@ -103,7 +103,7 @@ class ShareViewController: NSViewController {
 
     private func cancel(reason: String) {
         extensionContext?.cancelRequest(withError: NSError(
-            domain: "com.OP.ClipSync.share",
+            domain: "com.singheverything.crossiva.share",
             code: -1,
             userInfo: [NSLocalizedDescriptionKey: reason]
         ))

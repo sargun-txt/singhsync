@@ -1,0 +1,33 @@
+package com.singheverything.crossiva
+
+import android.content.Context
+import com.google.firebase.FirebaseOptions
+import org.json.JSONObject
+
+/** Copy to RegionConfig.kt. Real regional exports stay in ignored assets/firebase. */
+object RegionConfig {
+    const val REGION_CANADA = "CA"
+    const val REGION_INDIA = "IN"
+    const val REGION_US = "US"
+    fun appName(region: String) = FirebaseRegion.appName(region)
+    fun getOptionsForRegion(context: Context, region: String): FirebaseOptions? {
+        if (region == REGION_CANADA) return null
+        val expected = FcmTokenPolicy.authProject(region) ?: error("Unknown Firebase region")
+        val json = context.assets.open("firebase/google-services-${region.lowercase()}.json")
+            .bufferedReader().use { JSONObject(it.readText()) }
+        val project = json.getJSONObject("project_info")
+        check(project.getString("project_id") == expected) { "Regional config project mismatch" }
+        val clients = json.getJSONArray("client")
+        val client = (0 until clients.length()).map { clients.getJSONObject(it) }.single {
+            it.getJSONObject("client_info").getJSONObject("android_client_info")
+                .getString("package_name") == context.packageName
+        }
+        return FirebaseOptions.Builder()
+            .setProjectId(expected)
+            .setApplicationId(client.getJSONObject("client_info").getString("mobilesdk_app_id"))
+            .setApiKey(client.getJSONArray("api_key").getJSONObject(0).getString("current_key"))
+            .setGcmSenderId(project.getString("project_number"))
+            .apply { project.optString("storage_bucket").takeIf { it.isNotBlank() }?.let { setStorageBucket(it) } }
+            .build()
+    }
+}

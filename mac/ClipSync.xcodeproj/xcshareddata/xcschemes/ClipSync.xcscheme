@@ -16,7 +16,7 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "BF1CFB812E887C7500B7A454"
-               BuildableName = "ClipSync.app"
+               BuildableName = "Crossiva.app"
                BlueprintName = "ClipSync"
                ReferencedContainer = "container:ClipSync.xcodeproj">
             </BuildableReference>
@@ -46,7 +46,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "BF1CFB812E887C7500B7A454"
-            BuildableName = "ClipSync.app"
+            BuildableName = "Crossiva.app"
             BlueprintName = "ClipSync"
             ReferencedContainer = "container:ClipSync.xcodeproj">
          </BuildableReference>
@@ -63,7 +63,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "BF1CFB812E887C7500B7A454"
-            BuildableName = "ClipSync.app"
+            BuildableName = "Crossiva.app"
             BlueprintName = "ClipSync"
             ReferencedContainer = "container:ClipSync.xcodeproj">
          </BuildableReference>

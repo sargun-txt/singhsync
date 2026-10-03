@@ -6,7 +6,7 @@ import Foundation
 import Security
 
 enum KeychainHelper {
-    private static let service = "com.clipsync.encryption"
+    private static let service = "com.singheverything.crossiva.encryption"
 
     // MARK: - Legacy API Compatibility
 

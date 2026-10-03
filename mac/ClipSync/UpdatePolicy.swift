@@ -11,7 +11,7 @@ import Foundation
 
 nonisolated enum UpdatePolicy {
 
-    static let expectedAppName = "ClipSync.app"
+    static let expectedAppName = "Crossiva.app"
     static let maxDownloadBytes: Int64 = 500 * 1024 * 1024
     static let maxArchiveEntries = 20_000
     /// Hosts GitHub uses for the release API, release pages and asset downloads (redirects).
@@ -21,17 +21,17 @@ nonisolated enum UpdatePolicy {
     ]
 
     enum Rejection: String, Error, Equatable {
-        case noTrustAnchor = "This copy of ClipSync isn't signed with a Developer ID, so updates can't be verified automatically."
+        case noTrustAnchor = "This copy of Crossiva isn't signed with a Developer ID, so updates can't be verified automatically."
         case noMacAsset = "The release has no macOS download."
         case ambiguousAsset = "The release has more than one possible macOS download."
         case untrustedURL = "The download location isn't an expected GitHub address."
         case tooLarge = "The download is larger than expected."
         case unsafeArchiveEntry = "The update archive contains an unsafe path."
         case unexpectedArchiveContent = "The update archive contains unexpected files."
-        case missingApp = "The update archive doesn't contain ClipSync.app."
+        case missingApp = "The update archive doesn't contain Crossiva.app."
         case unsafeLink = "The update contains a link that points outside the app."
-        case invalidSignature = "The update isn't signed by the ClipSync developer."
-        case wrongBundle = "The downloaded app isn't ClipSync."
+        case invalidSignature = "The update isn't signed by the Crossiva developer."
+        case wrongBundle = "The downloaded app isn't Crossiva."
         case badVersion = "The downloaded app has an unreadable version."
         case notNewer = "The downloaded app isn't newer than this version."
         case missingExecutable = "The downloaded app is incomplete."

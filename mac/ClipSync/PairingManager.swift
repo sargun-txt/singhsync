@@ -284,7 +284,7 @@ class PairingManager: ObservableObject {
         guard (error as NSError).code == FirestoreErrorCode.permissionDenied.rawValue else { return false }
         stopListening()
         unpair()
-        repairNotice = "ClipSync's cloud sync was updated for security. Please pair your phone again."
+        repairNotice = "Crossiva's cloud sync was updated for security. Please pair your phone again."
         return true
     }
 
@@ -335,7 +335,7 @@ class PairingManager: ObservableObject {
                               CloudPairingAuth.canRestore(docId: savedPairingId, data: data, myUid: uid) else {
                             self.stopListening()
                             self.unpair()
-                            self.repairNotice = "ClipSync's cloud sync was updated for security. Please pair your phone again."
+                            self.repairNotice = "Crossiva's cloud sync was updated for security. Please pair your phone again."
                             return
                         }
                         // Pairing is valid — start monitoring for remote unpairs

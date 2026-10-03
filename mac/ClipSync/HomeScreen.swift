@@ -352,7 +352,7 @@ struct HomeScreen: View {
         showEncryptionSuccess = false
 
         DispatchQueue.global(qos: .userInitiated).async {
-            let testString = "ClipSync Encryption Test - \(UUID().uuidString)"
+            let testString = "Crossiva Encryption Test - \(UUID().uuidString)"
             let encrypted = encryptTestString(testString)
             let decrypted = decryptTestString(encrypted)
 

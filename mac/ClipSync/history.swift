@@ -74,7 +74,7 @@ struct NHSHistoryTab: View {
     static let placeholderItems: [NHSHistoryItem] = [
         NHSHistoryItem(id: UUID(), content: "npm install, its just a sample text", direction: "Sent to Android",       timeAgo: "15 min ago", type: .text,        isSuccess: true, filePath: nil),
         NHSHistoryItem(id: UUID(), content: "291 483",                              direction: "Received from Android", timeAgo: "2m ago",    type: .otp,         isSuccess: true, filePath: nil),
-        NHSHistoryItem(id: UUID(), content: "github.com/bunty/clipsync",            direction: "Sent to Android",       timeAgo: "1h ago",   type: .links,       isSuccess: false, filePath: nil),
+        NHSHistoryItem(id: UUID(), content: "github.com/bunty/crossiva",            direction: "Sent to Android",       timeAgo: "1h ago",   type: .links,       isSuccess: false, filePath: nil),
         NHSHistoryItem(id: UUID(), content: "Screenshot.png",                       direction: "Received from Android", timeAgo: "3h ago",   type: .screenshots, isSuccess: true, filePath: nil),
         NHSHistoryItem(id: UUID(), content: "sudo xcode-select --install",          direction: "Sent to Android",       timeAgo: "5h ago",   type: .text,        isSuccess: true, filePath: nil),
         NHSHistoryItem(id: UUID(), content: "https://figma.com/design/xyz",         direction: "Received from Android", timeAgo: "Yesterday",type: .links,       isSuccess: true, filePath: nil),

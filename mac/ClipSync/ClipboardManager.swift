@@ -60,7 +60,7 @@ class ClipboardManager: ObservableObject {
 
         lastChangeCount = pasteboard.changeCount
 
-        let queue = DispatchQueue(label: "com.clipsync.clipboard.monitor", qos: .userInitiated)
+        let queue = DispatchQueue(label: "com.singheverything.crossiva.clipboard.monitor", qos: .userInitiated)
         let newTimer = DispatchSource.makeTimerSource(queue: queue)
 
         newTimer.schedule(deadline: .now(), repeating: .milliseconds(300), leeway: .milliseconds(50))

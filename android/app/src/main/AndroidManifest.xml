@@ -57,7 +57,7 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.ClipSync"
+        android:theme="@style/Theme.Crossiva"
         tools:targetApi="31">
 
         <!-- Initialize explicitly in hybrid mode, with the default push/Crashlytics app unchanged. -->
@@ -74,7 +74,7 @@
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTop"
-            android:theme="@style/Theme.ClipSync">
+            android:theme="@style/Theme.Crossiva">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -175,8 +175,8 @@
             android:name=".CancelTransferReceiver"
             android:exported="false">
             <intent-filter>
-                <action android:name="com.bunty.clipsync.ACTION_CANCEL_RECEIVE" />
-                <action android:name="com.bunty.clipsync.ACTION_CANCEL_SEND" />
+                <action android:name="com.singheverything.crossiva.ACTION_CANCEL_RECEIVE" />
+                <action android:name="com.singheverything.crossiva.ACTION_CANCEL_SEND" />
             </intent-filter>
         </receiver>
 

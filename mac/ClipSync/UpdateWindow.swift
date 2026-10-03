@@ -127,7 +127,7 @@ struct UpdateWindow: View {
                 .font(.title2)
                 .fontWeight(.bold)
             
-            Text("The new version is signed by the ClipSync developer. Click Show in Finder, quit ClipSync, then drag the new app into your Applications folder to replace the old one.")
+            Text("The new version is signed by the Crossiva developer. Click Show in Finder, quit Crossiva, then drag the new app into your Applications folder to replace the old one.")
                 .font(.body)
                 .multilineTextAlignment(.center)
                 .foregroundColor(.secondary)
@@ -165,7 +165,7 @@ struct UpdateWindow: View {
                 .font(.title2)
                 .fontWeight(.bold)
 
-            Text("\(url.lastPathComponent) is in your Downloads folder. Quit ClipSync, drag it into Applications (replace the old version), then open it.")
+            Text("\(url.lastPathComponent) is in your Downloads folder. Quit Crossiva, drag it into Applications (replace the old version), then open it.")
                 .font(.body)
                 .multilineTextAlignment(.center)
                 .foregroundColor(.secondary)
@@ -224,7 +224,7 @@ struct UpdateWindow: View {
                 .font(.title2)
                 .fontWeight(.bold)
             
-            Text("ClipSync is running the latest version. No update is needed.")
+            Text("Crossiva is running the latest version. No update is needed.")
                 .font(.body)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
@@ -264,7 +264,7 @@ class UpdateWindowController: NSObject {
             defer: false
         )
         
-        newWindow.title = "ClipSync Updater"
+        newWindow.title = "Crossiva Updater"
         newWindow.titlebarAppearsTransparent = true
         newWindow.isMovableByWindowBackground = true
         newWindow.isReleasedWhenClosed = false

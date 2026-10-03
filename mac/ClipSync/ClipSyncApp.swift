@@ -221,7 +221,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, MessagingDelegate, UNUserNot
                 let delegate = Unmanaged<AppDelegate>.fromOpaque(observer).takeUnretainedValue()
                 DispatchQueue.main.async { delegate.processPendingBookmarks() }
             },
-            "com.OP.ClipSync.share.pendingFiles" as CFString,
+            "com.singheverything.crossiva.share.pendingFiles" as CFString,
             nil,
             .deliverImmediately
         )
@@ -289,7 +289,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, MessagingDelegate, UNUserNot
             if statusItem == nil {
                 let newItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
                 if let button = newItem.button {
-                    button.image = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: "ClipSync")
+                    button.image = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: "Crossiva")
                     button.action = #selector(togglePopover(_:))
                 }
                 statusItem = newItem
@@ -327,7 +327,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, MessagingDelegate, UNUserNot
     func preventAppSleep() {
         if assertionID != 0 { return } // Already preventing sleep
         
-        let reason = "ClipSync needs to monitor clipboard" as CFString
+        let reason = "Crossiva needs to monitor clipboard" as CFString
         let success = IOPMAssertionCreateWithName(
             kIOPMAssertionTypePreventUserIdleSystemSleep as CFString,
             IOPMAssertionLevel(kIOPMAssertionLevelOn),

@@ -79,7 +79,7 @@ struct LandingScreenAnimatedContent: View {
 
             if showTitle {
                 VStack(spacing: 8) {
-                    Text("ClipSync")
+                    Text("Crossiva")
                         .font(.custom("SF Pro Display", size: 64))
                         .fontWeight(.bold)
                         .kerning(-3)

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">ClipSync</string>
-    <string name="accessibility_service_description">ClipSync needs this to detect copied text and sync it with your Mac. No data is collected.</string>
+    <string name="app_name">Crossiva</string>
+    <string name="accessibility_service_description">Crossiva needs this to detect copied text and sync it with your Mac. No data is collected.</string>
     <string-array name="copy_words">
         <item>copy</item>
         <item>कॉपी</item>

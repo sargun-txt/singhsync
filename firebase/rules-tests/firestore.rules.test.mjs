@@ -44,8 +44,8 @@ const otp = (overrides = {}) => ({
 });
 
 const token = (overrides = {}) => ({
-  token: "fcm-token", platform: "android", projectId: "clipsyncind", deviceId: "Pixel_1",
-  authProjectId: "clipsync1-c3c3c", pairingId: P, senderId: "123456789012",
+  token: "fcm-token", platform: "android", projectId: "crossiva-dev-ca", deviceId: "Pixel_1",
+  authProjectId: "crossiva-dev-us", pairingId: P, senderId: "123456789012",
   applicationId: "1:123456789012:android:abcdef",
   deviceName: "Pixel", appVersion: "1", lastUpdated: serverTimestamp(), ...overrides,
 });
@@ -64,7 +64,7 @@ const activePairing = (id, members) => ({
 
 before(async () => {
   env = await initializeTestEnvironment({
-    projectId: "demo-clipsync",
+    projectId: "demo-crossiva",
     firestore: { rules: readFileSync(RULES, "utf8") },
   });
 });
@@ -272,7 +272,7 @@ describe("fcmTokens", () => {
   });
 
   it("rejects mislabeled or unknown Android push projects", async () => {
-    await assertFails(setDoc(doc(db(A), "fcmTokens", A), token({projectId: "clipsync1-c3c3c"})));
+    await assertFails(setDoc(doc(db(A), "fcmTokens", A), token({projectId: "crossiva-dev-us"})));
     await assertFails(setDoc(doc(db(A), "fcmTokens", A), token({authProjectId: "unknown"})));
   });
 
@@ -294,5 +294,21 @@ describe("everything else", () => {
     await assertFails(getDocs(collection(db(A), "fileTransfers")));
     await assertFails(setDoc(doc(db(A), "fileTransfers", "f"), { pairingId: P }));
     await assertFails(setDoc(doc(db(A), "anything", "x"), { a: 1 }));
+  });
+});
+
+
+describe("Canada shared FCM issuer", () => {
+  it("accepts all regional Auth projects while pinning the Canada issuer", async () => {
+    await seed(async f => setDoc(doc(f, "pairings", P), activePairing(P, [A, M])));
+    for (const authProjectId of ["crossiva-dev-ca", "crossiva-dev-us", "crossiva-dev-in"]) {
+      await assertSucceeds(setDoc(doc(db(A), "fcmTokens", A), token({authProjectId})));
+    }
+    await assertFails(setDoc(doc(db(A), "fcmTokens", A), token({projectId: "crossiva-dev-in"})));
+  });
+  it("Mac tokens also require a Canada issuer and known regional identity", async () => {
+    await assertSucceeds(setDoc(doc(db(M), "fcmTokens", M), token({platform: "mac"})));
+    await assertFails(setDoc(doc(db(M), "fcmTokens", M), token({platform: "mac", projectId: "crossiva-dev-us"})));
+    await assertFails(setDoc(doc(db(M), "fcmTokens", M), token({platform: "mac", authProjectId: "foreign"})));
   });
 });

@@ -125,7 +125,7 @@ struct MacDiagnosticConsole: View {
                                 
                                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                                     logLines.append("> Waiting for active pings from Android...")
-                                    logLines.append("  ! Open the ClipSync app on your Android and run Diagnostics")
+                                    logLines.append("  ! Open the Crossiva app on your Android and run Diagnostics")
                                     
                                     // Keep checking state alive so user knows it's waiting
                                     // We won't set isChecking = false here, so the Close button stays hidden?

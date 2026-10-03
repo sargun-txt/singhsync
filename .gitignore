@@ -100,3 +100,8 @@ android/app/release/
 .agents/
 android/.gradle_user_home/
 *.log
+
+# Regional Firebase client configuration exports
+android/app/src/main/assets/firebase/*.json
+mac/ClipSync/GoogleService-Info-*.plist
+firebase/rules-tests/node_modules/

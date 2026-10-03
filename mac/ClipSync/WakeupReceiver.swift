@@ -83,10 +83,10 @@ class WakeupReceiver: NSObject, ObservableObject, CBPeripheralManagerDelegate {
             guard !legacyPeerNotified else { return }
             legacyPeerNotified = true
             let content = UNMutableNotificationContent()
-            content.title = "Update ClipSync on your phone"
-            content.body = "This version of ClipSync can't sync securely with the older app on your Android phone."
+            content.title = "Update Crossiva on your phone"
+            content.body = "This version of Crossiva can't sync securely with the older app on your Android phone."
             UNUserNotificationCenter.current().add(
-                UNNotificationRequest(identifier: "clipsync.legacy-peer", content: content, trigger: nil))
+                UNNotificationRequest(identifier: "crossiva.legacy-peer", content: content, trigger: nil))
         }
     }
 
@@ -149,7 +149,7 @@ class WakeupReceiver: NSObject, ObservableObject, CBPeripheralManagerDelegate {
             // Triggers the one-time system Bluetooth permission dialog on first run.
             peripheralManager = CBPeripheralManager(
                 delegate: self,
-                queue: DispatchQueue(label: "com.clipsync.ble"),
+                queue: DispatchQueue(label: "com.singheverything.crossiva.ble"),
                 options: [CBPeripheralManagerOptionShowPowerAlertKey: true]
             )
             return
@@ -234,7 +234,7 @@ class WakeupReceiver: NSObject, ObservableObject, CBPeripheralManagerDelegate {
     private func startAdvertisingIfNeeded() {
         guard let peripheral = peripheralManager, hasAddedService else { return }
 
-        let macName = Host.current().localizedName ?? "ClipSync"
+        let macName = Host.current().localizedName ?? "Crossiva"
         peripheral.startAdvertising([
             CBAdvertisementDataServiceUUIDsKey: [serviceUUID],
             CBAdvertisementDataLocalNameKey: macName

@@ -15,6 +15,8 @@ import FirebaseAuth
 
 class FirebaseManager {
     static let shared = FirebaseManager()
+    let app: FirebaseApp
+    let auth: Auth
     let db: Firestore
     /// The region whose Firebase project this process is configured with (fixed until relaunch).
     let configuredRegion: String
@@ -22,17 +24,29 @@ class FirebaseManager {
     /// Configures Firebase with the region-appropriate options (or default if none),
     /// then creates a Firestore instance with in-memory caching.
     private init() {
-        let region = UserDefaults.standard.string(forKey: "server_region") ?? "IN"
+        let region = UserDefaults.standard.string(forKey: "server_region") ?? "CA"
         configuredRegion = region
-        if FirebaseApp.app() == nil {
-            if let options = RegionConfig.getOptions(for: region) {
-                FirebaseApp.configure(options: options)
-            } else {
-                FirebaseApp.configure()
-            }
+        if FirebaseApp.app() == nil { FirebaseApp.configure() }
+        guard let defaultApp = FirebaseApp.app(),
+              defaultApp.options.projectID == "crossiva-dev-ca",
+              let expected = FirebaseRegion.projectID(for: region) else {
+            preconditionFailure("Default or regional Firebase project mismatch")
         }
-
-        db = Firestore.firestore()
+        if region == "CA" {
+            app = defaultApp
+        } else {
+            guard let name = FirebaseRegion.appName(for: region),
+                  let options = RegionConfig.getOptions(for: region) else {
+                preconditionFailure("Regional Firebase configuration unavailable")
+            }
+            if FirebaseApp.app(name: name) == nil { FirebaseApp.configure(name: name, options: options) }
+            guard let regionalApp = FirebaseApp.app(name: name), regionalApp.options.projectID == expected else {
+                preconditionFailure("Regional Firebase initialization failed")
+            }
+            app = regionalApp
+        }
+        auth = Auth.auth(app: app)
+        db = Firestore.firestore(app: app)
 
         let settings = FirestoreSettings()
         settings.cacheSettings = MemoryCacheSettings()
@@ -56,26 +70,26 @@ class FirebaseManager {
     /// True only when this Mac holds a Firebase identity. Firestore rules require one for
     /// every protected document; there is no unauthenticated fallback.
     var isAuthenticated: Bool {
-        return Auth.auth().currentUser != nil
+        return auth.currentUser != nil
     }
 
     /// This Mac's anonymous Firebase UID (persisted by FirebaseAuth across launches), if signed in.
     var currentUid: String? {
-        return Auth.auth().currentUser?.uid
+        return auth.currentUser?.uid
     }
 
     /// Calls back with the signed-in UID, signing in anonymously first if needed. On failure
     /// the caller must not touch Firestore (fail closed) and should surface a retry path.
     func withAuthenticatedUid(_ completion: @escaping (Result<String, Error>) -> Void) {
-        if let uid = Auth.auth().currentUser?.uid {
+        if let uid = auth.currentUser?.uid {
             completion(.success(uid))
             return
         }
-        Auth.auth().signInAnonymously { result, error in
+        auth.signInAnonymously { result, error in
             if let uid = result?.user.uid {
                 completion(.success(uid))
             } else {
-                completion(.failure(error ?? NSError(domain: "ClipSync.FirebaseAuth", code: -1)))
+                completion(.failure(error ?? NSError(domain: "Crossiva.FirebaseAuth", code: -1)))
             }
         }
     }
@@ -90,7 +104,7 @@ class FirebaseManager {
     }
 
     /// Shown when cloud sync cannot sign in. Firestore is not contacted in that state.
-    static let authFailureMessage = "Couldn't connect to ClipSync cloud sync. Check your internet connection and try again."
+    static let authFailureMessage = "Couldn't connect to Crossiva cloud sync. Check your internet connection and try again."
 
 
     /// Convenience accessor that returns a typed Firestore CollectionReference.

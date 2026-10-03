@@ -72,7 +72,7 @@ struct FinalScreen: View {
                 .opacity(cardsOpacity)
             
             
-            Text("To keep ClipSync working smoothly, allow these\npermissions")
+            Text("To keep Crossiva working smoothly, allow these\npermissions")
                 .font(.custom("SF Pro", size: 24))
                 .fontWeight(.medium)
                 .kerning(-0.66)
@@ -255,7 +255,7 @@ struct FinalScreen: View {
             )
             .offset(x: 105, y: 505 + cardsOffset)
             .opacity(cardsOpacity)
-            .alert("Enable ClipSync Share Extension", isPresented: $showExtensionAlert) {
+            .alert("Enable Crossiva Share Extension", isPresented: $showExtensionAlert) {
                 Button("Open Settings") {
                     openExtensionsSettings()
                 }
@@ -263,7 +263,7 @@ struct FinalScreen: View {
                     extensionIntent = false
                 }
             } message: {
-                Text("In the settings window that opens, click the ⓘ next to 'Sharing' (or 'Added Extensions') and enable ClipSync.")
+                Text("In the settings window that opens, click the ⓘ next to 'Sharing' (or 'Added Extensions') and enable Crossiva.")
             }
             
             
@@ -358,7 +358,7 @@ struct FinalScreen: View {
             
             task.standardOutput = pipe
             task.standardError = pipe
-            task.arguments = ["-c", "/usr/bin/pluginkit -m -i com.OP.ClipSync.ClipSyncShare"]
+            task.arguments = ["-c", "/usr/bin/pluginkit -m -i com.singheverything.crossiva.share"]
             task.executableURL = URL(fileURLWithPath: "/bin/sh")
             
             var isEnabled = false

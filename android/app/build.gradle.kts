@@ -7,11 +7,11 @@ plugins {
 }
 
 android {
-    namespace = "com.bunty.clipsync"
+    namespace = "com.singheverything.crossiva"
     compileSdk = 37
 
     defaultConfig {
-        applicationId = "com.bunty.clipsync"
+        applicationId = "com.singheverything.crossiva"
         minSdk = 31
         targetSdk = 36
         versionCode = 3

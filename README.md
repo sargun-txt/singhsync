@@ -1,37 +1,42 @@
+> Crossiva is a SinghEverything product derived from the MIT-licensed ClipSync
+> repository by Bhanu. The inherited MIT notice is retained in LICENSE. Owned
+> release/download links are pending configuration; existing artwork is intentionally
+> retained for this software-identity migration. See CROSSIVA_MIGRATION.md.
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/banner-dark.svg">
     <source media="(prefers-color-scheme: light)" srcset="assets/title-light.svg">
-    <img src="assets/banner-dark.svg" width="372" alt="ClipSync"/>
+    <img src="assets/banner-dark.svg" width="372" alt="Crossiva"/>
   </picture>
 </p>
 
 <br/>
 
 <h3 align="center">
-  ClipSync is the ultimate way to sync your clipboard and transfer files between Android and Mac—instantly and securely. Copy on your Mac, paste on your Android, and transfer full files at blazing-fast speeds. Simple, seamless, and effortless.
+  Crossiva is the ultimate way to sync your clipboard and transfer files between Android and Mac—instantly and securely. Copy on your Mac, paste on your Android, and transfer full files at blazing-fast speeds. Simple, seamless, and effortless.
 </h3>
 
 <br/>
 
 <p align="center">
-  <a href="https://github.com/WinShell-Bhanu/Clipsync/releases/CLip"><img src="assets/download(macos).svg" alt="Download for macOS" height="58"/></a>
+  <a href="#"><img src="assets/download(macos).svg" alt="Download for macOS" height="58"/></a>
   &nbsp;&nbsp;
-  <a href="https://github.com/WinShell-Bhanu/ClipSync/releases/latest"><img src="assets/download(android).svg" alt="Download for Android" height="58"/></a>
+  <a href="#"><img src="assets/download(android).svg" alt="Download for Android" height="58"/></a>
   &nbsp;&nbsp;
   <a href=""><img src="assets/orion-badge.png" alt="Download for Android" height="58"/></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/WinShell-Bhanu/CLipSync/releases/latest"><img src="https://img.shields.io/github/v/release/WinShell-Bhanu/ClipSync?style=for-the-badge&labelColor=1c1c1e&color=0A84FF&logo=github&logoColor=white" alt="Latest Release"/></a>
+  <a href="#"><img src="#" alt="Latest Release"/></a>
   &nbsp;
-  <a href="https://github.com/WinShell-Bhanu/ClipSync/releases"><img src="https://img.shields.io/github/downloads/WinShell-Bhanu/ClipSync/total?style=for-the-badge&labelColor=1c1c1e&color=3a3a3c" alt="Downloads"/></a>
+  <a href="#"><img src="#" alt="Downloads"/></a>
   &nbsp;
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-3a3a3c?style=for-the-badge&labelColor=1c1c1e" alt="License: MIT"/></a>
   &nbsp;
-  <a href="https://www.buymeacoffee.com/clipsync"><img src="https://img.shields.io/badge/buy_me_a_coffee-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black" alt="Buy Me A Coffee"/></a>
+  <a href="#"><img src="https://img.shields.io/badge/buy_me_a_coffee-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black" alt="Buy Me A Coffee"/></a>
   &nbsp;
-  <a href="https://github.com/WinShell-Bhanu/Clipsync/stargazers"><img src="https://img.shields.io/github/stars/WinShell-Bhanu/Clipsync?style=for-the-badge&label=Stars&labelColor=1c1c1e&color=1c1c1e&logo=github&logoColor=white" alt="Stars"/></a>
+  <a href="#"><img src="#" alt="Stars"/></a>
 </p>
 
 <br/><br/><br/>
@@ -56,7 +61,7 @@
    Tap Copy on Android -----> Just press Cmd+V on Mac
    ```
 
--  **Fast File Transfer** — Send files of any size quickly and securely between your devices. Whether it's a quick document or gigabytes of media, ClipSync handles it with unmatched reliability.
+-  **Fast File Transfer** — Send files of any size quickly and securely between your devices. Whether it's a quick document or gigabytes of media, Crossiva handles it with unmatched reliability.
   
   <p align="center">
   <img src="assets/file%20transfer.png" alt="File-Transfer"/>
@@ -82,45 +87,43 @@
 ## Installation
 
 ### macOS
-Head to the [Releases tab](https://github.com/WinShell-Bhanu/Clipsync/releases/latest) or click the "Download for macOS" button to grab the `ClipSync.vX.X.X.zip` release file.
+Head to the [Releases tab](#) or click the "Download for macOS" button to grab the `Crossiva.vX.X.X.zip` release file.
 
-**Installation steps:**
-1. Unzip the downloaded folder.
-2. Inside the folder, double-click on `Install ClipSync.command`.
-3. If macOS blocks the script with an "unidentified developer" warning, open **System Settings** ➔ **Privacy and Security**, scroll down, and click **"Open anyway"**.
-4. The script will securely install ClipSync into your Applications folder and retain your pairing data.
+**Installation:** Crossiva release distribution is not configured yet. Future signed
+releases contain only `Crossiva.app`; install the verified app manually. Downloaded
+installer scripts must not be packaged or executed.
 
-To enable the ClipSync share extension ➔ Open **System Settings** ➔ **Privacy & Security** ➔ **Extensions** ➔ **Sharing**, and check the box for ClipSync.
+To enable the Crossiva share extension ➔ Open **System Settings** ➔ **Privacy & Security** ➔ **Extensions** ➔ **Sharing**, and check the box for Crossiva.
 
 ### Android
-Head to the [Releases tab](https://github.com/WinShell-Bhanu/Clipsync/releases/latest) or click the "Download for Android" button to grab the `app-release.apk` and install it.
+Head to the [Releases tab](#) or click the "Download for Android" button to grab the `app-release.apk` and install it.
 
 > [!WARNING]
 > **Accessibility Permission Blocked?**
 > Android may block the accessibility permission required by the app. If you try to grant the permission and it's blocked, follow these steps:
 > 1. Close the app (but don't swipe it away from memory).
-> 2. Long-press the ClipSync app icon and tap **App Info**.
+> 2. Long-press the Crossiva app icon and tap **App Info**.
 > 3. Tap the **3 dots** in the top right corner and select **"Allow restricted settings"**.
 > 4. Enter your PIN or use your fingerprint to authenticate.
-> 5. Go back to the ClipSync app, and you will now be able to grant the accessibility permission.
+> 5. Go back to the Crossiva app, and you will now be able to grant the accessibility permission.
 
 ---
 
 ## Local Build
 
-If you prefer to compile ClipSync from source yourself, follow the instructions below.
+If you prefer to compile Crossiva from source yourself, follow the instructions below.
 
 ### macOS Build
 1. Clone the repository and navigate to the mac folder:
    ```bash
-   git clone https://github.com/WinShell-Bhanu/Clipsync
-   cd Clipsync/mac
+   # Clone the owned Crossiva repository once its URL is configured
+   cd Crossiva/mac
    ```
-2. Open `Clipsync.xcodeproj` in Xcode.
+2. Open `ClipSync.xcodeproj` in Xcode.
 3. In the menu bar, go to **Product ➔ Archive** and wait for it to finish compiling.
 4. After a successful build, go to **Window ➔ Organizer**.
 5. Select the archive, click **Distribute App**, select **Custom**, choose **Copy App**, and save it to a local folder.
-6. Drag the newly built `ClipSync` app into your **Applications** folder.
+6. Drag the newly built `Crossiva` app into your **Applications** folder.
 
 > [!NOTE]
 > Cloud sync will not work out-of-the-box on local builds as it relies on Firebase servers. To get cloud sync working, you must provide your own `google-services.json` / `GoogleService-Info.plist` from Firebase. **Local sync mode will work normally.**
@@ -136,12 +139,12 @@ If you prefer to compile ClipSync from source yourself, follow the instructions 
 
 As this project is fully free and the server costs are handled personally, any contributions—whether it's code, bug reports, or simply spreading the word—are massively appreciated! It would be awesome if you could help this repo grow by contributing.
 
-<a href="https://github.com/WinShell-Bhanu/ClipSync/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=WinShell-Bhanu/CLipSync" />
+<a href="#">
+  <img src="#" />
 </a>
 
 <p align="center">
-  <a href="https://www.buymeacoffee.com/clipsync"><img src="https://img.shields.io/badge/buy_me_a_coffee-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black" alt="Buy Me A Coffee"/></a>
+  <a href="#"><img src="https://img.shields.io/badge/buy_me_a_coffee-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black" alt="Buy Me A Coffee"/></a>
 </p>
 
 ## License

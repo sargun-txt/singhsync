@@ -85,7 +85,7 @@ struct BLEDiscover: View {
                 .position(x: 295.0, y: 310.0)
             
             // 5. Subtitle
-            Text("Launch ClipSync on your Android device and\nstart a scan to bridge the gap.")
+            Text("Launch Crossiva on your Android device and\nstart a scan to bridge the gap.")
                 .font(.system(size: 15, weight: .bold))
                 .tracking(-0.45)
                 .foregroundColor(Color(red: 0.216, green: 0.216, blue: 0.231))

@@ -31,15 +31,15 @@ class MacUpdateManager: NSObject, ObservableObject, URLSessionDownloadDelegate {
     let expectedTeam: String? = UpdatePolicy.expectedTeamIdentifier(selfTeam: CodeSignatureVerifier.selfTeamIdentifier())
     var canVerifyUpdates: Bool { expectedTeam != nil }
 
-    private let repoURL = "https://api.github.com/repos/WinShell-Bhanu/Clipsync/releases/latest"
+    private let repoURL = ProductIdentity.updateAPIURL
     private var downloadTask: URLSessionDownloadTask?
     private var session: URLSession!
     private var stagedUpdate: UpdateStager.StagedUpdate?
     /// Why the current download was cancelled by a safety check (redirect, size), if it was.
     private var downloadRejection: UpdatePolicy.Rejection?
-    private let processingQueue = DispatchQueue(label: "com.clipsync.update", qos: .userInitiated)
+    private let processingQueue = DispatchQueue(label: "com.singheverything.crossiva.update", qos: .userInitiated)
 
-    private var bundleIdentifier: String { Bundle.main.bundleIdentifier ?? "com.OP.ClipSync" }
+    private var bundleIdentifier: String { Bundle.main.bundleIdentifier ?? "com.singheverything.crossiva" }
     private var currentVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
     }
@@ -69,15 +69,16 @@ class MacUpdateManager: NSObject, ObservableObject, URLSessionDownloadDelegate {
             self.updateError = nil
             self.isUpToDate = false
 
-            guard let url = URL(string: self.repoURL) else {
+            guard !self.repoURL.isEmpty, let url = URL(string: self.repoURL) else {
                 self.isCheckingForUpdate = false
+                if manual { self.updateError = "Crossiva update repository is not configured." }
                 return
             }
 
             var request = URLRequest(url: url)
             request.cachePolicy = .reloadIgnoringLocalCacheData
             request.setValue("application/vnd.github.v3+json", forHTTPHeaderField: "Accept")
-            request.setValue("ClipSync-Mac-App", forHTTPHeaderField: "User-Agent")
+            request.setValue("Crossiva-Mac-App", forHTTPHeaderField: "User-Agent")
 
             URLSession.shared.dataTask(with: request) { [weak self] data, _, error in
                 DispatchQueue.main.async {
@@ -175,7 +176,7 @@ class MacUpdateManager: NSObject, ObservableObject, URLSessionDownloadDelegate {
         }
         // `location` is deleted when this method returns: move it into private temp storage now.
         let fm = FileManager.default
-        let archive = fm.temporaryDirectory.appendingPathComponent("ClipSyncDownload-\(UUID().uuidString).zip")
+        let archive = fm.temporaryDirectory.appendingPathComponent("CrossivaDownload-\(UUID().uuidString).zip")
         guard (try? fm.moveItem(at: location, to: archive)) != nil else {
             downloadRejection = .extractionFailed
             return

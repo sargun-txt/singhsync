@@ -55,13 +55,14 @@ function isUsableToken(token) {
 
 module.exports = {resolveWakeupTarget, isUsableToken};
 
-const INDIA_PROJECT = "clipsyncind";
-const US_PROJECT = "clipsync1-c3c3c";
+const CANADA_PROJECT = "crossiva-dev-ca";
+const INDIA_PROJECT = "crossiva-dev-in";
+const US_PROJECT = "crossiva-dev-us";
 const TOKEN_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 
 /**
  * Selects only a known FCM issuer. Android has a shared default-app issuer;
- * Mac tokens remain regional. Client metadata never chooses arbitrary projects.
+ * Mac tokens also originate from the Canada default app. Client metadata never chooses arbitrary projects.
  * @param {Object} record token document plus numeric lastUpdatedMs
  * @param {string} pairingId pairing whose other member is the destination
  * @param {string} regionalProjectId actual Function deployment project
@@ -71,24 +72,25 @@ const TOKEN_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
  */
 function resolveTokenRoute(record, pairingId, regionalProjectId,
     androidIssuer, nowMs = Date.now()) {
-  if (![INDIA_PROJECT, US_PROJECT].includes(regionalProjectId)) return null;
+  if (![CANADA_PROJECT, INDIA_PROJECT, US_PROJECT].includes(regionalProjectId)) return null;
   if (!record || !isUsableToken(record.token)) return null;
   if (!Number.isFinite(record.lastUpdatedMs) ||
       record.lastUpdatedMs > nowMs ||
       nowMs - record.lastUpdatedMs > TOKEN_MAX_AGE_MS) return null;
   if (record.platform === "android") {
     if (record.authProjectId !== regionalProjectId ||
-        record.projectId !== INDIA_PROJECT || record.pairingId !== pairingId) return null;
+        record.projectId !== CANADA_PROJECT || record.pairingId !== pairingId) return null;
     if (!androidIssuer || !isShortString(androidIssuer.senderId, 32) ||
         !/^\d+$/.test(androidIssuer.senderId) ||
         !isShortString(androidIssuer.applicationId, 256) ||
         !androidIssuer.applicationId.startsWith(`1:${androidIssuer.senderId}:android:`)) return null;
     if (record.senderId !== androidIssuer.senderId ||
         record.applicationId !== androidIssuer.applicationId) return null;
-    return {token: record.token, projectId: INDIA_PROJECT};
+    return {token: record.token, projectId: CANADA_PROJECT};
   }
-  if (record.platform === "mac" && record.projectId === regionalProjectId) {
-    return {token: record.token, projectId: regionalProjectId};
+  if (record.platform === "mac" && record.projectId === CANADA_PROJECT &&
+      record.authProjectId === regionalProjectId) {
+    return {token: record.token, projectId: CANADA_PROJECT};
   }
   return null;
 }

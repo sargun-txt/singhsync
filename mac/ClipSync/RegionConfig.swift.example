@@ -1,34 +1,24 @@
 import Foundation
 import FirebaseCore
 
+/// Copy to RegionConfig.swift; real regional plists are ignored bundle resources.
 struct RegionConfig {
+    static let REGION_CANADA = "CA"
     static let REGION_INDIA = "IN"
     static let REGION_US = "US"
-    
-    // US Project Credentials
-    // Derived from your GoogleService-Info.plist
-    struct US {
-        static let projectID = "YOUR_PROJECT_ID"
-        static let googleAppID = "YOUR_GOOGLE_APP_ID" 
-        static let gcmSenderID = "YOUR_GCM_SENDER_ID"
-        static let storageBucket = "YOUR_STORAGE_BUCKET"
-        static let apiKey = "YOUR_API_KEY" 
-    }
-    
+    static let sortedCountryNames = Locale.Region.isoRegions.compactMap {
+        Locale(identifier: "en").localizedString(forRegionCode: $0.identifier)
+    }.sorted()
+    static func getOptimalServer(for country: String) -> String { FirebaseRegion.forCountry(country) }
     static func getOptions(for region: String) -> FirebaseOptions? {
-        if region == REGION_US {
-            let options = FirebaseOptions(googleAppID: US.googleAppID, gcmSenderID: US.gcmSenderID)
-            options.apiKey = US.apiKey
-            options.projectID = US.projectID
-            options.storageBucket = US.storageBucket
-            return options
+        guard region != REGION_CANADA else { return nil }
+        guard let expected = FirebaseRegion.projectID(for: region),
+              let path = Bundle.main.path(forResource: "GoogleService-Info-\(region)", ofType: "plist"),
+              let options = FirebaseOptions(contentsOfFile: path),
+              options.projectID == expected,
+              options.bundleID == Bundle.main.bundleIdentifier else {
+            preconditionFailure("Missing or mismatched regional Firebase configuration")
         }
-        
-      
-        return nil
+        return options
     }
-}
-
-struct Secrets {
-    static let fallbackEncryptionKey = "YOUR_FALLBACK_KEY_32_BYTES_HEX"
 }

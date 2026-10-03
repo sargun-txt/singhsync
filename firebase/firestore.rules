@@ -126,23 +126,30 @@ service cloud.firestore {
       allow update: if false;
     }
 
+    // Validate both token creates and updates. Client reads remain forbidden.
+    function isValidFcmToken() {
+      return request.resource.data.keys().hasOnly(['token', 'platform', 'projectId', 'deviceId', 'deviceName', 'appVersion', 'lastUpdated', 'authProjectId', 'senderId', 'applicationId', 'pairingId'])
+        && isShortString(request.resource.data.token, 4096)
+        && request.resource.data.platform in ['android', 'mac']
+        && request.resource.data.projectId == 'crossiva-dev-ca'
+        && request.resource.data.authProjectId in ['crossiva-dev-ca', 'crossiva-dev-us', 'crossiva-dev-in']
+        && request.resource.data.lastUpdated == request.time
+        && (!(request.resource.data.platform == 'android') || (
+             request.resource.data.keys().hasAll(['authProjectId', 'senderId', 'applicationId', 'pairingId', 'lastUpdated'])
+             && request.resource.data.projectId == 'crossiva-dev-ca'
+             && request.resource.data.authProjectId in ['crossiva-dev-ca', 'crossiva-dev-in', 'crossiva-dev-us']
+             && isShortString(request.resource.data.senderId, 32)
+             && isShortString(request.resource.data.applicationId, 256)
+             && isMember(request.resource.data.pairingId)
+             && request.resource.data.lastUpdated == request.time));
+    }
+
     // ── fcmTokens/{uid}: each identity manages only its own token ──────────
     // Never readable by clients; Cloud Functions read it with the Admin SDK and only for a
     // UID that is a member of the pairing the triggering item belongs to.
     match /fcmTokens/{uid} {
       allow get, list: if false;
-      allow create, update: if signedIn() && request.auth.uid == uid
-        && request.resource.data.keys().hasOnly(['token', 'platform', 'projectId', 'deviceId', 'deviceName', 'appVersion', 'lastUpdated', 'authProjectId', 'senderId', 'applicationId', 'pairingId'])
-        && isShortString(request.resource.data.token, 4096)
-        && request.resource.data.platform in ['android', 'mac']
-        && (!(request.resource.data.platform == 'android') || (
-             request.resource.data.keys().hasAll(['authProjectId', 'senderId', 'applicationId', 'pairingId', 'lastUpdated'])
-             && request.resource.data.projectId == 'clipsyncind'
-             && request.resource.data.authProjectId in ['clipsyncind', 'clipsync1-c3c3c']
-             && isShortString(request.resource.data.senderId, 32)
-             && isShortString(request.resource.data.applicationId, 256)
-             && isMember(request.resource.data.pairingId)
-             && request.resource.data.lastUpdated == request.time));
+      allow create, update: if signedIn() && request.auth.uid == uid && isValidFcmToken();
       allow delete: if signedIn() && request.auth.uid == uid;
     }
 

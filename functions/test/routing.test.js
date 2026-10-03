@@ -47,49 +47,56 @@ const {resolveTokenRoute, wakeupMessage, TOKEN_MAX_AGE_MS} = require("../routing
 const issuer = {senderId: "123456789012", applicationId: "1:123456789012:android:abcdef"};
 const now = 1700000000000;
 const registration = (overrides = {}) => ({
-  token: "token", platform: "android", projectId: "clipsyncind",
-  authProjectId: "clipsync1-c3c3c", pairingId: "P",
+  token: "token", platform: "android", projectId: "crossiva-dev-ca",
+  authProjectId: "crossiva-dev-us", pairingId: "P",
   senderId: issuer.senderId, applicationId: issuer.applicationId, lastUpdatedMs: now,
   ...overrides,
 });
 
 test("US Android uses the explicitly authorized default push endpoint", () => {
-  assert.deepEqual(resolveTokenRoute(registration(), "P", "clipsync1-c3c3c", issuer, now),
-      {token: "token", projectId: "clipsyncind"});
+  assert.deepEqual(resolveTokenRoute(registration(), "P", "crossiva-dev-us", issuer, now),
+      {token: "token", projectId: "crossiva-dev-ca"});
 });
-test("India Android uses its default project's endpoint", () => {
-  assert.deepEqual(resolveTokenRoute(registration({authProjectId: "clipsyncind"}), "P", "clipsyncind", issuer, now),
-      {token: "token", projectId: "clipsyncind"});
+test("India Android uses Canada's shared endpoint", () => {
+  assert.deepEqual(resolveTokenRoute(registration({authProjectId: "crossiva-dev-in"}), "P", "crossiva-dev-in", issuer, now),
+      {token: "token", projectId: "crossiva-dev-ca"});
 });
-test("Mac continues to use its own regional project's endpoint", () => {
-  assert.deepEqual(resolveTokenRoute(registration({platform: "mac", projectId: "clipsync1-c3c3c"}),
-      "P", "clipsync1-c3c3c", {}, now), {token: "token", projectId: "clipsync1-c3c3c"});
-  assert.equal(resolveTokenRoute(registration({platform: "mac"}), "P", "clipsync1-c3c3c", issuer, now), null);
+test("Mac uses Canada issuer with regional Auth", () => {
+  assert.deepEqual(resolveTokenRoute(registration({platform: "mac", projectId: "crossiva-dev-ca"}),
+      "P", "crossiva-dev-us", {}, now), {token: "token", projectId: "crossiva-dev-ca"});
+  assert.equal(resolveTokenRoute(registration({platform: "mac", authProjectId: "crossiva-dev-in"}), "P", "crossiva-dev-us", issuer, now), null);
 });
 test("cannot choose an arbitrary project or mislabel an Android token", () => {
-  for (const projectId of ["clipsync1-c3c3c", "attacker-project", undefined]) {
-    assert.equal(resolveTokenRoute(registration({projectId}), "P", "clipsync1-c3c3c", issuer, now), null);
+  for (const projectId of ["crossiva-dev-us", "attacker-project", undefined]) {
+    assert.equal(resolveTokenRoute(registration({projectId}), "P", "crossiva-dev-us", issuer, now), null);
   }
   assert.equal(resolveTokenRoute(registration(), "P", "attacker-project", issuer, now), null);
 });
 test("region and pairing transitions cannot reuse old registrations", () => {
-  assert.equal(resolveTokenRoute(registration(), "P", "clipsyncind", issuer, now), null);
-  assert.equal(resolveTokenRoute(registration(), "new-pair", "clipsync1-c3c3c", issuer, now), null);
+  assert.equal(resolveTokenRoute(registration(), "P", "crossiva-dev-in", issuer, now), null);
+  assert.equal(resolveTokenRoute(registration(), "new-pair", "crossiva-dev-us", issuer, now), null);
 });
 test("unknown issuer configuration and inconsistent sender IDs fail closed", () => {
-  assert.equal(resolveTokenRoute(registration(), "P", "clipsync1-c3c3c", {}, now), null);
-  assert.equal(resolveTokenRoute(registration({senderId: "999"}), "P", "clipsync1-c3c3c", issuer, now), null);
-  assert.equal(resolveTokenRoute(registration({applicationId: "another-app"}), "P", "clipsync1-c3c3c", issuer, now), null);
+  assert.equal(resolveTokenRoute(registration(), "P", "crossiva-dev-us", {}, now), null);
+  assert.equal(resolveTokenRoute(registration({senderId: "999"}), "P", "crossiva-dev-us", issuer, now), null);
+  assert.equal(resolveTokenRoute(registration({applicationId: "another-app"}), "P", "crossiva-dev-us", issuer, now), null);
 });
 test("expired, future and unversioned Android registrations fail closed", () => {
   for (const lastUpdatedMs of [null, now + 1, now - TOKEN_MAX_AGE_MS - 1]) {
-    assert.equal(resolveTokenRoute(registration({lastUpdatedMs}), "P", "clipsync1-c3c3c", issuer, now), null);
+    assert.equal(resolveTokenRoute(registration({lastUpdatedMs}), "P", "crossiva-dev-us", issuer, now), null);
   }
-  assert.equal(resolveTokenRoute({token: "old"}, "P", "clipsync1-c3c3c", issuer, now), null);
+  assert.equal(resolveTokenRoute({token: "old"}, "P", "crossiva-dev-us", issuer, now), null);
 });
 test("push payload carries only a wake-up signal", () => {
   const message = wakeupMessage("token");
   assert.deepEqual(message.data, {type: "wake_up"});
   assert.equal(message.notification, undefined);
   assert.deepEqual(Object.keys(message).sort(), ["android", "apns", "data", "token"]);
+});
+
+test("all regional Auth backends route Android through Canada", () => {
+  for (const authProjectId of ["crossiva-dev-ca", "crossiva-dev-us", "crossiva-dev-in"]) {
+    assert.deepEqual(resolveTokenRoute(registration({authProjectId}), "P", authProjectId, issuer, now),
+      {token: "token", projectId: "crossiva-dev-ca"});
+  }
 });

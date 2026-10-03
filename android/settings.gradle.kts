@@ -27,5 +27,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "ClipSync"
+rootProject.name = "Crossiva"
 include(":app")

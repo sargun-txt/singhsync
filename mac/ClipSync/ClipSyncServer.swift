@@ -25,8 +25,8 @@ class ClipSyncServer: ObservableObject {
 
     /// Session IDs of recently accepted v2 transfers (bounded, time-limited).
     private let replayCache = TcpReplayCache()
-    private let queue = DispatchQueue(label: "com.clipsync.tcpserver", qos: .userInitiated)
-    private let diskWriteQueue = DispatchQueue(label: "com.clipsync.diskwrite", qos: .userInitiated)
+    private let queue = DispatchQueue(label: "com.singheverything.crossiva.tcpserver", qos: .userInitiated)
+    private let diskWriteQueue = DispatchQueue(label: "com.singheverything.crossiva.diskwrite", qos: .userInitiated)
     private let diskWriteSemaphore = DispatchSemaphore(value: 8)
 
     // MARK: - State (observed by UI)
@@ -146,13 +146,13 @@ class ClipSyncServer: ObservableObject {
 
     // MARK: - mDNS / Bonjour advertisement
 
-    private let bonjourType = "_clipsync._tcp"
+    private let bonjourType = "_crossiva._tcp"
 
-    /// Advertises "_clipsync._tcp." with a TXT record containing the pairingId.
+    /// Advertises "_crossiva._tcp." with a TXT record containing the pairingId.
     /// This allows Android to find exactly this Mac (not any other ClipSync Mac on
     /// the same network) by matching the pairingId from the QR code.
     private func advertiseBonjour(on listener: NWListener) {
-        let macName = Host.current().localizedName ?? "ClipSync Mac"
+        let macName = Host.current().localizedName ?? "Crossiva Mac"
         let pairingId = PairingManager.shared.pairingId ?? ""
 
         var txt = NWTXTRecord()
@@ -287,7 +287,7 @@ class ClipSyncServer: ObservableObject {
     /// Files are always created fresh under `destinationDir`; an existing file is never opened.
     private func beginPayload(connection: NWConnection, header: TcpFrameHeader, rootKey: SymmetricKey, rawFileName: String?, destinationDir: URL?) {
         let fileName = TransferSecurityPolicy.sanitizedFileName(rawFileName)
-            ?? "ClipSync_\(Int(Date().timeIntervalSince1970))"
+            ?? "Crossiva_\(Int(Date().timeIntervalSince1970))"
 
         var handle: FileHandle? = nil
         var destUrl: URL? = nil
@@ -672,7 +672,7 @@ class ClipSyncServer: ObservableObject {
 
         // Write to a temp file so we can hand a FileHandle to the existing streaming path.
         let tmpURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("clipsync_text_\(UUID().uuidString).tmp")
+            .appendingPathComponent("crossiva_text_\(UUID().uuidString).tmp")
         do {
             try textData.write(to: tmpURL)
         } catch _ {
@@ -785,7 +785,7 @@ class ClipSyncServer: ObservableObject {
         guard WakeupReceiver.shared.hasAndroidSubscriber else {
             DispatchQueue.main.async {
                 self.isSendingFile = false
-                self.lastError = "Android is not reachable. Open the ClipSync app on your phone."
+                self.lastError = "Android is not reachable. Open the Crossiva app on your phone."
             }
             completion()
             return

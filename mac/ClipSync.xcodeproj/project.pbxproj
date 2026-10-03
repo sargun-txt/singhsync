@@ -7,7 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		665EC1862D7FF21F68B10660 /* ClipSyncShare.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 8AEE0AB12CAD2A92D3973E76 /* ClipSyncShare.appex */; };
+		665EC1862D7FF21F68B10660 /* CrossivaShare.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 8AEE0AB12CAD2A92D3973E76 /* CrossivaShare.appex */; };
 		BF3F450E2F4C9D9000DECBEE /* FirebaseMessaging in Frameworks */ = {isa = PBXBuildFile; productRef = BF3F450D2F4C9D9000DECBEE /* FirebaseMessaging */; };
 		BF9C469E3031BCFC00A32E54 /* FirebaseCrashlytics in Frameworks */ = {isa = PBXBuildFile; productRef = BF9C469D3031BCFC00A32E54 /* FirebaseCrashlytics */; };
 		BFE62CD62F34AF70009DE3D3 /* Shimmer in Frameworks */ = {isa = PBXBuildFile; productRef = BFE62CD52F34AF70009DE3D3 /* Shimmer */; };
@@ -28,7 +28,7 @@
 			dstPath = "";
 			dstSubfolderSpec = 13;
 			files = (
-				665EC1862D7FF21F68B10660 /* ClipSyncShare.appex in Embed App Extensions */,
+				665EC1862D7FF21F68B10660 /* CrossivaShare.appex in Embed App Extensions */,
 			);
 			name = "Embed App Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -39,9 +39,9 @@
 		1026E2CEF3CDDD6B7B48361C /* ClipSyncShare.entitlements */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.entitlements; path = ClipSyncShare.entitlements; sourceTree = "<group>"; };
 		3F87326091A4D00463502911 /* SharedViewController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SharedViewController.swift; sourceTree = "<group>"; };
 		56DE0A174AA06938F2EA5F5D /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
-		8AEE0AB12CAD2A92D3973E76 /* ClipSyncShare.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = ClipSyncShare.appex; sourceTree = BUILT_PRODUCTS_DIR; };
-		BE5E34C39BD00C8FE028E2FB /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.0.sdk/System/Library/Frameworks/Cocoa.framework; sourceTree = DEVELOPER_DIR; };
-		BF1CFB822E887C7500B7A454 /* ClipSync.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ClipSync.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		8AEE0AB12CAD2A92D3973E76 /* CrossivaShare.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = CrossivaShare.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		BE5E34C39BD00C8FE028E2FB /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = System/Library/Frameworks/Cocoa.framework; sourceTree = SDKROOT; };
+		BF1CFB822E887C7500B7A454 /* Crossiva.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Crossiva.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		BF94DD432EF29B7F0034A1B9 /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
@@ -112,8 +112,8 @@
 		BF1CFB832E887C7500B7A454 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				BF1CFB822E887C7500B7A454 /* ClipSync.app */,
-				8AEE0AB12CAD2A92D3973E76 /* ClipSyncShare.appex */,
+				BF1CFB822E887C7500B7A454 /* Crossiva.app */,
+				8AEE0AB12CAD2A92D3973E76 /* CrossivaShare.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -144,7 +144,7 @@
 			);
 			name = ClipSyncShare;
 			productName = ClipSyncShare;
-			productReference = 8AEE0AB12CAD2A92D3973E76 /* ClipSyncShare.appex */;
+			productReference = 8AEE0AB12CAD2A92D3973E76 /* CrossivaShare.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
 		BF1CFB812E887C7500B7A454 /* ClipSync */ = {
@@ -175,7 +175,7 @@
 				BF9C469D3031BCFC00A32E54 /* FirebaseCrashlytics */,
 			);
 			productName = ClipSync;
-			productReference = BF1CFB822E887C7500B7A454 /* ClipSync.app */;
+			productReference = BF1CFB822E887C7500B7A454 /* Crossiva.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -265,8 +265,8 @@
 				INFOPLIST_FILE = ClipSyncShare/Info.plist;
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
 				MARKETING_VERSION = 3.0.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.OP.ClipSync.ClipSyncShare;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_BUNDLE_IDENTIFIER = com.singheverything.crossiva.share;
+				PRODUCT_NAME = CrossivaShare;
 				SDKROOT = macosx;
 				SWIFT_VERSION = 5.0;
 			};
@@ -283,8 +283,8 @@
 				INFOPLIST_FILE = ClipSyncShare/Info.plist;
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
 				MARKETING_VERSION = 3.0.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.OP.ClipSync.ClipSyncShare;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_BUNDLE_IDENTIFIER = com.singheverything.crossiva.share;
+				PRODUCT_NAME = CrossivaShare;
 				SDKROOT = macosx;
 				SWIFT_VERSION = 5.0;
 			};
@@ -434,9 +434,10 @@
 				ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY = NO;
 				ENABLE_USER_SELECTED_FILES = readwrite;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSAccessibilityUsageDescription = "ClipSync needs Accessibility access to detect when you copy text so it can instantly sync to your Android device.";
-				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "ClipSync uses Bluetooth to discover and pair securely with your Android device on the local network.";
-				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSAccessibilityUsageDescription = "Crossiva needs Accessibility access to detect when you copy text so it can instantly sync to your Android device.";
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Crossiva uses Bluetooth to discover and pair securely with your Android device on the local network.";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "SinghEverything";
+				INFOPLIST_KEY_CFBundleDisplayName = Crossiva;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -447,8 +448,8 @@
 					"-Xlinker",
 					"-interposable",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.OP.ClipSync;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_BUNDLE_IDENTIFIER = com.singheverything.crossiva;
+				PRODUCT_NAME = Crossiva;
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				REGISTER_APP_GROUPS = YES;
 				RUNTIME_EXCEPTION_ALLOW_DYLD_ENVIRONMENT_VARIABLES = YES;
@@ -488,9 +489,10 @@
 				ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY = NO;
 				ENABLE_USER_SELECTED_FILES = readwrite;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSAccessibilityUsageDescription = "ClipSync needs Accessibility access to detect when you copy text so it can instantly sync to your Android device.";
-				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "ClipSync uses Bluetooth to discover and pair securely with your Android device on the local network.";
-				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSAccessibilityUsageDescription = "Crossiva needs Accessibility access to detect when you copy text so it can instantly sync to your Android device.";
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Crossiva uses Bluetooth to discover and pair securely with your Android device on the local network.";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "SinghEverything";
+				INFOPLIST_KEY_CFBundleDisplayName = Crossiva;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -498,8 +500,8 @@
 				MACOSX_DEPLOYMENT_TARGET = 14.6;
 				MARKETING_VERSION = 3.0.0;
 				OTHER_LDFLAGS = "";
-				PRODUCT_BUNDLE_IDENTIFIER = com.OP.ClipSync;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_BUNDLE_IDENTIFIER = com.singheverything.crossiva;
+				PRODUCT_NAME = Crossiva;
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				REGISTER_APP_GROUPS = YES;
 				RUNTIME_EXCEPTION_ALLOW_DYLD_ENVIRONMENT_VARIABLES = YES;
